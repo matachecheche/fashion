@@ -43,26 +43,29 @@ class HumanReadablePresentationTests(unittest.TestCase):
 class AzureApkPipelineTests(unittest.TestCase):
     def test_azure_pipeline_has_real_android_gradle_build_and_artifact(self) -> None:
         source = PIPELINE.read_text(encoding="utf-8")
+        build_script = (ROOT / "mobile-app/ci/build-azure-apk.sh").read_text(encoding="utf-8")
         required = (
             "vmImage: ubuntu-24.04",
             "JavaToolInstaller@0",
             "NodeTool@0",
             "EXPO_PUBLIC_API_URL",
-            "expo prebuild --platform android",
-            ":app:assembleDebug",
-            '"$APKSIGNER" verify',
+            "filePath: mobile-app/ci/build-azure-apk.sh",
             "PublishPipelineArtifact@1",
             "FashionStore-APK",
         )
         for item in required:
             with self.subTest(item=item):
                 self.assertIn(item, source)
+        self.assertIn(":app:assembleRelease", build_script)
+        self.assertNotIn(":app:assembleDebug", build_script)
+        self.assertIn('"$APKSIGNER" verify', build_script)
+        self.assertIn("assets/index.android.bundle", build_script)
 
     def test_pipeline_checks_live_api_health_before_build(self) -> None:
-        source = PIPELINE.read_text(encoding="utf-8")
-        self.assertIn("/health", source)
-        self.assertIn("payload.estado !== 'ok'", source)
-        self.assertLess(source.index("Validate production API URL and health"), source.index("Build, sign-check and package Android APK"))
+        source = (ROOT / "mobile-app/ci/build-azure-apk.sh").read_text(encoding="utf-8")
+        self.assertIn("$API_BASE_URL/health", source)
+        self.assertIn("body.estado !== 'ok'", source)
+        self.assertLess(source.index("$API_BASE_URL/health"), source.index("npm ci"))
 
     def test_mobile_app_version_was_incremented_for_ui_fix(self) -> None:
         app = json.loads((ROOT / "mobile-app/app.json").read_text(encoding="utf-8"))["expo"]

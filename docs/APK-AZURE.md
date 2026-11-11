@@ -1,50 +1,57 @@
-# Generar APK de FashionStore en la nube de Azure
+# APK Android autónomo de FashionStore en Azure Pipelines
 
-Este flujo usa **Azure Pipelines con un agente Microsoft-hosted `ubuntu-24.04`**. El agente efímero instala/usa Node 22, Java 17 y Android SDK; Expo genera el proyecto Android nativo y Gradle compila el APK. El archivo queda publicado como artefacto descargable del run de Azure Pipelines.
+El pipeline de este repositorio genera un **APK de la variante RELEASE** en un agente Microsoft-hosted `ubuntu-24.04`. No genera un development client ni un `assembleDebug` que dependa de Metro. Expo realiza el prebuild y Gradle incorpora el bundle JavaScript al APK mediante `:app:assembleRelease`.
 
-## Qué construye
+## Qué genera
 
-- APK Android `debug`, firmado por Gradle con la clave debug temporal del agente.
-- Compatible con instalación para pruebas internas y evaluación académica.
-- Incluye `EXPO_PUBLIC_API_URL` dentro del bundle; por eso se valida antes que `https://<fqdn-api>/api/health` responda `{"estado":"ok"}`.
-- **No es una firma estable para Google Play ni para actualizar una instalación firmada con otra clave.** Como la clave debug del agente es temporal, al instalar un APK de un run distinto puede ser necesario desinstalar la versión de prueba anterior. Para distribución y actualizaciones estables se debe configurar un keystore propio como Secure File de Azure Pipelines y habilitar un perfil release.
+- Archivo `.apk` instalable directamente en un teléfono Android.
+- Variante Android `release`, con `assets/index.android.bundle` incluido; no necesita Metro ni una PC para servir JavaScript.
+- `applicationId` esperado: `bo.fashionstore.app`.
+- URL de NestJS Azure incorporada en el bundle desde `EXPO_PUBLIC_API_URL`.
+- APK firmado para pruebas internas con una clave de CI temporal. No es la clave de firma estable para Google Play.
+- Artefacto Azure Pipelines llamado `FashionStore-APK`, con el APK y `INFORMACION-BUILD.txt` (commit, versión, tamaño y SHA-256).
 
-## Configuración única en Azure DevOps
+## Configuración única en Azure DevOps Services
 
-1. Sube el proyecto actualizado a GitHub (incluido `azure-pipelines-apk.yml`).
-2. Abre Azure DevOps y entra en una organización y proyecto. Si todavía no tienes uno, crea ambos desde Azure DevOps.
+1. Sube el proyecto completo a GitHub, incluyendo `azure-pipelines-apk.yml` y `mobile-app/ci/build-azure-apk.sh`.
+2. En Azure DevOps Services, crea o abre un proyecto.
 3. En **Pipelines → Library → Variable groups → Add**, crea el grupo `fashionstore-mobile`.
-4. Añade la variable `EXPO_PUBLIC_API_URL` con la URL pública del API terminada en `/api`, por ejemplo `https://fashionstore-api-xxxx.azurecontainerapps.io/api`. Déjala como variable no secreta: es una URL pública y se incorporará al bundle Android. Guarda el grupo y autoriza su uso en el pipeline.
-5. En **Pipelines → New pipeline**, selecciona **GitHub**, autoriza la conexión y selecciona el repositorio `fashionstore`.
-6. En la detección/configuración selecciona **Existing Azure Pipelines YAML file** y elige `/azure-pipelines-apk.yml`.
-7. Guarda el pipeline. Tanto el pipeline como el grupo de variables quedan configurados; en compilaciones posteriores solo tienes que pulsar **Run pipeline**. No tendrás que volver a escribir la URL.
+4. Agrega `EXPO_PUBLIC_API_URL` como variable no secreta, con la URL pública HTTPS del backend NestJS terminada en `/api`, por ejemplo `https://<tu-api>.azurecontainerapps.io/api`. Autoriza el uso del grupo por el pipeline.
+5. En **Pipelines → New pipeline**, conecta el repositorio GitHub y elige **Existing Azure Pipelines YAML file**: `/azure-pipelines-apk.yml`.
+6. Guarda el pipeline. La variable de URL se configura una sola vez; las ejecuciones siguientes solo requieren pulsar **Run pipeline**.
 
-## Compilar un APK
+> `PublishPipelineArtifact@1` requiere Azure DevOps Services. En Azure DevOps Server local se debe reemplazar por `PublishBuildArtifacts@1`.
 
-1. En Azure DevOps abre **Pipelines → FashionStore Android APK → Run pipeline**.
-2. Ejecuta el pipeline. El job lee `EXPO_PUBLIC_API_URL` desde el grupo `fashionstore-mobile`, valida `/health` y se detiene antes de compilar si el API no está saludable.
-3. Espera que las etapas terminen en verde. Abre el resumen de la ejecución, sección **Related → Published**, y descarga el artefacto **FashionStore-APK**.
-4. Descomprime el artefacto y transfiere `FashionStore-azure-debug-<BuildId>.apk` al dispositivo Android para instalarlo.
-5. Solo cuando cambie el FQDN público de NestJS debes editar la variable `EXPO_PUBLIC_API_URL` en el grupo; no hace falta editar el código ni volver a configurar el pipeline.
+## Compilar y descargar el APK
 
-## Qué hace el pipeline automáticamente
+1. Abre el pipeline `FashionStore Android APK` y pulsa **Run pipeline**.
+2. El agente valida Node 20.19.x, Java 17 y Android SDK.
+3. El script consulta `GET <EXPO_PUBLIC_API_URL>/health`, espera reintentos para permitir el arranque en frío y exige `estado: "ok"` y el servicio NestJS.
+4. Instala dependencias con `npm ci` usando `mobile-app/package-lock.json`.
+5. Ejecuta `tsc --noEmit`.
+6. Asigna un `versionCode` de CI superior al valor base sin modificar el archivo versionado en Git.
+7. Ejecuta `expo prebuild --platform android --clean --no-install`, con `EAS_BUILD_PROFILE=azure` para desactivar el permiso de tráfico HTTP plano.
+8. Genera una clave temporal de pruebas en el agente y asigna esa firma al build type `release`.
+9. Gradle ejecuta `:app:assembleRelease`.
+10. El script comprueba la firma con `apksigner`, alineación con `zipalign`, paquete/versión con `aapt`, integridad ZIP y existencia de `assets/index.android.bundle`. También verifica que el bundle contenga la URL pública de API configurada.
+11. En el resumen de la ejecución, abre **Published → FashionStore-APK** y descarga el artefacto. Dentro estará `FashionStore-<version>-<BuildId>.apk`.
 
-1. Comprueba que la URL sea HTTPS y termine en `/api`.
-2. Consulta `GET <EXPO_PUBLIC_API_URL>/health` y exige `estado=ok`.
-3. Instala dependencias mediante `npm ci --legacy-peer-deps`.
-4. Ejecuta `tsc --noEmit`.
-5. Ejecuta `expo prebuild --platform android --clean --no-install`.
-6. Ejecuta Gradle `:app:assembleDebug` en el agente Azure.
-7. Comprueba que el APK exista, sea un ZIP válido y tenga firma Android verificable.
-8. Publica el APK y un archivo informativo con el commit y SHA-256.
+## Firma y actualizaciones
 
-## Diferencia con EAS
+Por defecto, el agente crea una clave temporal para que el APK se pueda instalar en un dispositivo de prueba sin configurar una cuenta de tienda. El agente Microsoft-hosted es efímero; por tanto, la clave puede cambiar entre ejecuciones y Android puede rechazar una actualización sobre la instalación anterior. En ese caso desinstala el APK anterior antes de instalar el nuevo.
 
-`mobile-app/build-apk.bat` y `mobile-app/build-apk.sh` siguen siendo la vía alternativa de **Expo EAS Build**. EAS compila en la infraestructura de Expo, no en Azure. Para compilar en infraestructura de Azure usa el pipeline `azure-pipelines-apk.yml`.
+Para actualizar la misma instalación sin desinstalar, configurar una clave de firma persistente como **Secure File** de Azure DevOps y adaptar el bloque de firma del script para utilizar ese keystore. Nunca subas el keystore ni sus contraseñas a GitHub ni los incluyas en el ZIP.
 
-## Costos, límites y seguridad
+Este APK RELEASE firmado con clave interna de pruebas no debe subirse a Google Play. Para Google Play se requiere una upload key privada estable y configurar la firma de release correspondiente.
 
-- Azure Pipelines usa un agente hospedado temporal; su disponibilidad, minutos paralelos y cuota dependen de la organización/proyecto. No se crea Container App, VM ni recurso de cómputo permanente para compilar.
-- El proceso necesita conectividad para descargar dependencias npm/Android. Si el agente no obtiene una herramienta o cuota disponible, el run falla mostrando el paso concreto.
-- La variable `EXPO_PUBLIC_API_URL` es pública y queda embebida en la app. Nunca configures `DATABASE_URL`, `JWT_SECRET`, `IA_INTERNAL_KEY`, claves de IA o credenciales en `EXPO_PUBLIC_*`.
-- Este APK es para pruebas internas. La firma debug temporal no sustituye una clave privada estable para distribución.
+## Costos y límites
+
+- Azure Pipelines usa un agente hospedado temporal; la disponibilidad/minutos paralelos depende de la organización y su plan.
+- No se crea una VM ni Container App permanente para compilar.
+- Se necesita conectividad a npm, Google Android SDK y Gradle para descargar dependencias.
+- El job tiene un timeout de 60 minutos y limita los workers de Gradle para ajustarse al agente hospedado.
+- La URL `EXPO_PUBLIC_API_URL` queda dentro del bundle Android y no es un secreto. No coloques `DATABASE_URL`, `JWT_SECRET`, `IA_INTERNAL_KEY`, Groq/Gemini ni credenciales privadas en variables `EXPO_PUBLIC_*`.
+
+## Limitaciones de verificación
+
+El pipeline verifica la compilación nativa, la firma, la alineación, el `applicationId`, el `versionCode`, el bundle JS y la URL de API. No inicia un emulador Android en el agente Linux hospedado. La prueba final de instalación/ejecución se debe realizar en un teléfono Android real; Azure Pipelines no debe marcarse como prueba funcional en dispositivo si no se ejecuta ese paso aparte.

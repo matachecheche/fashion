@@ -9,10 +9,11 @@ Sigue [`docs/APK-AZURE.md`](APK-AZURE.md). El archivo `azure-pipelines-apk.yml` 
 1. Lee `EXPO_PUBLIC_API_URL` del grupo de variables `fashionstore-mobile`.
 2. Comprueba que el endpoint HTTPS `/api/health` responda `estado=ok`.
 3. Instala dependencias, valida TypeScript y ejecuta Expo Prebuild.
-4. Compila el APK Android con Gradle (`:app:assembleDebug`).
-5. Verifica la firma y la integridad del APK y publica el artefacto `FashionStore-APK`.
+4. Genera el proyecto Android con Expo Prebuild y compila la variante `release` con Gradle (`:app:assembleRelease`); así el APK incluye `assets/index.android.bundle` y no depende de Metro.
+5. Verifica firma, alineación, `applicationId`, versión, bundle JavaScript, URL de API e integridad del APK.
+6. Publica el artefacto `FashionStore-APK`.
 
-La configuración de Azure DevOps se hace una sola vez. En posteriores builds solo se ejecuta el pipeline. El artefacto es un APK `debug` para pruebas internas, no una distribución de Google Play. La firma debug es efímera en el agente; para actualizaciones estables o distribución pública se necesita un keystore propio y un perfil `release` protegido.
+La configuración de Azure DevOps se hace una sola vez. En posteriores builds solo se ejecuta el pipeline. El artefacto es un APK RELEASE instalable para pruebas internas, firmado con una clave CI temporal. No es un paquete listo para Google Play ni conserva la misma firma entre agentes efímeros; consulta `docs/APK-AZURE.md` para opciones de firma estable.
 
 ## Alternativa: Expo Application Services (EAS)
 

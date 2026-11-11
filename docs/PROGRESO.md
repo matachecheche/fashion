@@ -51,3 +51,12 @@
 - **Pruebas locales de esta revisión:** 99/99 pruebas Python; YAML válido; scripts Bash del pipeline pasan `bash -n`; sintaxis TSX/TS de los tres archivos modificados comprobada con TypeScript `transpileModule`; barrido de vistas sin `<pre>` ni expresiones JSX `JSON.stringify`.
 - **Pendiente de validación externa:** este entorno no consiguió descargar npm desde `registry.npmjs.org`, por lo que no se pudo realizar `npm ci`, `tsc --noEmit` completo ni build Vite/Expo/Gradle. Tampoco se ejecutó el pipeline dentro de la organización Azure DevOps del propietario ni se instaló el APK en Android. No afirmar APK cloud generado hasta que una ejecución Azure termine correctamente y el artefacto se instale y pruebe.
 - Los cambios visuales no alteran PostgreSQL, migraciones, API ni semilla. No ejecutar `RESTABLECER-DEMO` ni volver a cargar Neon por esta corrección. Para producción: reconstruir/actualizar la imagen `fashionstore-web` en GHCR; para Android: ejecutar Azure Pipeline y distribuir el APK nuevo.
+
+
+## Compilación APK autónoma en Azure — corrección posterior
+
+- El pipeline Azure anterior usaba `assembleDebug`, que no es adecuado para entregar un APK autónomo sin Metro en una app React Native/Expo.
+- Se sustituyó por `:app:assembleRelease` y se añadió `mobile-app/ci/build-azure-apk.sh`.
+- El build inyecta `EAS_BUILD_PROFILE=azure`, valida el healthcheck público, instala el toolchain Expo SDK 54 (Node 20.19, JDK 17, Android 36 y NDK 27.1), genera una clave temporal de pruebas y verifica firma, alineación, paquete, versionCode, bundle JS y URL de API.
+- El APK se publica como artefacto `FashionStore-APK`. La firma temporal sirve para instalación de pruebas; para actualizaciones sin desinstalar debe configurarse una clave persistente como Secure File de Azure DevOps.
+- Verificación local: `bash -n mobile-app/ci/build-azure-apk.sh`, parseo del YAML y 109 pruebas automatizadas superadas. La compilación Gradle real debe ejecutarse en Azure DevOps porque este entorno no puede resolver el registro npm ni tiene Android SDK instalado.
