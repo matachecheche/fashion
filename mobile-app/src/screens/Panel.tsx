@@ -9,6 +9,7 @@ import {
   TextInput,
   TouchableOpacity,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
@@ -147,6 +148,9 @@ const MetricTile: React.FC<{ label: string; value: string }> = ({ label, value }
 export const PanelScreen: React.FC = () => {
   const { tenantSlug, usuario, online, encolarVenta, mostrarToast } = useApp();
   const nav = useNav();
+  const { width: windowWidth } = useWindowDimensions();
+  const moduleColumns = windowWidth < 360 ? 1 : windowWidth < 760 ? 2 : 3;
+  const moduleCardWidth = (moduleColumns === 1 ? '100%' : moduleColumns === 2 ? '48%' : '31.5%') as `${number}%`;
   const role = textOf(usuario?.rol, '');
   const allowedModules = useMemo(() => MODULES.filter((item) => item.roles.includes(role)), [role]);
   const [module, setModule] = useState<ModuleId | 'menu'>('menu');
@@ -162,6 +166,18 @@ export const PanelScreen: React.FC = () => {
   const [productName, setProductName] = useState('');
   const [productPrice, setProductPrice] = useState('');
   const [categoryId, setCategoryId] = useState('');
+  const [productType, setProductType] = useState('vestido');
+  const [productColor, setProductColor] = useState('rojo');
+  const [productSize, setProductSize] = useState('M');
+  const [productStock, setProductStock] = useState('10');
+  const [productMaterial, setProductMaterial] = useState('Algodón Premium');
+  const [productDescription, setProductDescription] = useState('');
+  const [variantProductId, setVariantProductId] = useState<number | null>(null);
+  const [variantSku, setVariantSku] = useState('');
+  const [variantSize, setVariantSize] = useState('M');
+  const [variantColor, setVariantColor] = useState('rojo');
+  const [variantColorHex, setVariantColorHex] = useState('#8B1E2D');
+  const [variantPrice, setVariantPrice] = useState('0');
   const [inventoryStoreId, setInventoryStoreId] = useState('');
   const [inventoryVariantId, setInventoryVariantId] = useState('');
   const [inventoryQuantity, setInventoryQuantity] = useState('');
@@ -173,6 +189,8 @@ export const PanelScreen: React.FC = () => {
   const [userName, setUserName] = useState('');
   const [userEmail, setUserEmail] = useState('');
   const [userPassword, setUserPassword] = useState('');
+  const [userPhone, setUserPhone] = useState('');
+  const [userBranchId, setUserBranchId] = useState('1');
   const [userRole, setUserRole] = useState('cajero');
   const [reportText, setReportText] = useState('Ventas confirmadas del mes por sucursal');
   const [report, setReport] = useState<ReportResult | null>(null);
@@ -298,6 +316,23 @@ export const PanelScreen: React.FC = () => {
     if (module !== 'menu') void loadModule(module);
   };
 
+  const liberarReservasVencidas = async () => {
+    if (!online) { mostrarToast('Conéctate para liberar reservas vencidas.'); return; }
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await apiFetch<Row>('/reservas/liberar-vencidas', { method: 'POST', tenantSlug });
+      mostrarToast(`Reservas vencidas liberadas: ${numberOf(response.liberadas, 0)}.`);
+      await loadModule('reservas');
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'No se pudieron liberar las reservas vencidas.';
+      setError(message);
+      mostrarToast(message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const act = async (path: string, body?: Row, message = 'Cambios guardados.') => {
     setSaving(true);
     setError(null);
@@ -331,17 +366,49 @@ export const PanelScreen: React.FC = () => {
       await apiFetch('/catalogo/productos', {
         method: 'POST',
         tenantSlug,
-        body: { nombre: name, categoria_id: category, precio_base: price, tipo_prenda: 'blusa' },
+        body: { nombre: name, categoria_id: category, precio_base: price, tipo_prenda: productType, color_inicial: productColor, talla_inicial: productSize, stock_inicial: Number(productStock || 0), material: productMaterial, descripcion: productDescription },
       });
       setProductName('');
       setProductPrice('');
-      mostrarToast('Producto creado.');
+      setProductDescription('');
+      setProductMaterial('Algodón Premium');
+      setProductStock('10');
+      mostrarToast('Producto creado con variante inicial e inventario.');
       await loadModule('productos');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'No se pudo crear el producto.');
     } finally {
       setSaving(false);
     }
+  };
+
+  const crearVariante = async (productId: number) => {
+    if (!online) { setError('Conéctate para crear variantes.'); return; }
+    setSaving(true);
+    setError(null);
+    try {
+      await apiFetch(`/catalogo/productos/${productId}/variantes`, {
+        method: 'POST',
+        tenantSlug,
+        body: {
+          sku: variantSku.trim() || undefined,
+          talla: variantSize,
+          color: variantColor,
+          color_hex: variantColorHex,
+          precio_adicional: Number(variantPrice || 0),
+        },
+      });
+      setVariantProductId(null);
+      setVariantSku('');
+      setVariantSize('M');
+      setVariantColor('rojo');
+      setVariantColorHex('#8B1E2D');
+      setVariantPrice('0');
+      mostrarToast('Variante creada correctamente.');
+      await loadModule('productos');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'No se pudo crear la variante.');
+    } finally { setSaving(false); }
   };
 
   const crearUsuario = async () => {
@@ -354,11 +421,14 @@ export const PanelScreen: React.FC = () => {
       await apiFetch('/usuarios', {
         method: 'POST',
         tenantSlug,
-        body: { nombre: userName.trim(), email: userEmail.trim(), password: userPassword, rol: userRole },
+        body: { nombre: userName.trim(), email: userEmail.trim(), password: userPassword, rol: userRole, telefono: userPhone.trim(), sucursal_id: userBranchId ? Number(userBranchId) : undefined },
       });
       setUserName('');
       setUserEmail('');
       setUserPassword('');
+      setUserPhone('');
+      setUserBranchId('1');
+      setUserRole('cajero');
       mostrarToast('Usuario creado.');
       await loadModule('usuarios');
     } catch (cause) {
@@ -595,6 +665,7 @@ export const PanelScreen: React.FC = () => {
   };
 
   const reportRowLabel = (row: Row): string => {
+    if (module === 'dashboard') return `${textOf(row.producto_nombre, 'Producto')} · ${textOf(row.sku, 'Sin SKU')}`;
     const name = textOf(row.nombre || row.producto_nombre || row.cliente_nombre || row.sku || row.numero_comprobante || row.codigo || row.id || row.operacion_id, 'Registro');
     const state = textOf(row.estado || row.estado_pago, '');
     const detail = textOf(row.nombre_producto || row.sucursal_nombre || row.email || row.detalle || row.motivo_error, '');
@@ -622,16 +693,42 @@ export const PanelScreen: React.FC = () => {
           <Text style={Estilos.texto}>{money(item.total)} · {textOf(item.sucursal_nombre)} · {textOf(item.fecha || item.creado_en)}</Text>
         )}
         {module === 'reservas' && (
-          <Text style={Estilos.texto}>{textOf(item.cliente_email || item.email)} · {textOf(item.sucursal_nombre)} · {textOf(item.fecha_cita)}</Text>
+          <View style={{ gap: 4 }}>
+            <Text style={Estilos.texto}>{textOf(item.cliente_nombre || item.usuario_nombre || item.cliente_email || item.email)} · {textOf(item.sucursal_nombre)} · {textOf(item.fecha_cita)}</Text>
+            <Text style={Estilos.subtitulo}>Expira: {textOf(item.expira_en, 'No indicado')}</Text>
+            {rowsOf(item.items).map((line, index) => (
+              <Text key={`${textOf(line.variante_id, 'v')}-${index}`} style={[Estilos.texto, { fontSize: 12 }]}>
+                {textOf(line.producto_nombre, 'Prenda')} · {textOf(line.sku)} · {textOf(line.talla)}/{textOf(line.color)} × {textOf(line.cantidad, '1')}
+              </Text>
+            ))}
+          </View>
         )}
         {module === 'propuestas' && (
           <Text style={Estilos.texto}>{textOf(item.tipo_prenda)} · {money(item.precio_sugerido)} · {textOf(item.proveedor_nombre)}</Text>
         )}
         {module === 'usuarios' && (
-          <Text style={Estilos.texto}>{textOf(item.email)} · {textOf(item.sucursal_nombre)} · {Boolean(item.activo) ? 'Activo' : 'Inactivo'}</Text>
+          <View style={{ gap: 3 }}>
+            <Text style={Estilos.texto}>{textOf(item.email)} · Rol: {textOf(item.rol)} · Sucursal: {textOf(item.sucursal_nombre, item.sucursal_id ? `#${textOf(item.sucursal_id)}` : 'Sin asignar')}</Text>
+            <Text style={Estilos.subtitulo}>{textOf(item.telefono, 'Sin teléfono')} · Alta: {textOf(item.creado_en, 'Fecha no disponible')} · {Boolean(item.activo) ? 'Activo' : 'Inactivo'}</Text>
+          </View>
         )}
         {module === 'conflictos' && (
           <Text style={Estilos.texto}>Tipo: {textOf(item.tipo, 'operación')} · Código: {textOf(item.codigo_conflicto, 'no indicado')} · Último error: {textOf(item.motivo_error || item.ultimo_error)}. Reintentar vuelve a validar stock y crea la venta solo si aún hay existencias.</Text>
+        )}
+        {module === 'dashboard' && (
+          <View style={{ gap: 4 }}>
+            <Text style={Estilos.texto}>Sucursal: {textOf(item.sucursal_nombre)} · SKU: {textOf(item.sku)}</Text>
+            <Text style={Estilos.texto}>{textOf(item.producto_nombre)} · {textOf(item.talla, 'Talla única')} / {textOf(item.color, 'Color no indicado')}</Text>
+            <Text style={{ color: Colores.error, fontSize: 13, fontWeight: '800' }}>Disponible: {textOf(item.stock_disponible, '0')} · Mínimo: {textOf(item.stock_minimo, '0')}</Text>
+          </View>
+        )}
+
+        {module === 'reservas' && (
+          <Tarjeta>
+            <Text style={Estilos.h3}>Liberar reservas vencidas</Text>
+            <Text style={Estilos.texto}>Recupera automáticamente el stock retenido por citas que ya vencieron.</Text>
+            <Boton titulo={saving ? 'Procesando…' : 'Liberar vencidas'} variante="outline" onPress={() => void liberarReservasVencidas()} deshabilitado={saving || !online} estilo={{ marginTop: 10 }} />
+          </Tarjeta>
         )}
 
         {module === 'pos' && (
@@ -642,7 +739,23 @@ export const PanelScreen: React.FC = () => {
           </View>
         )}
         {module === 'productos' && role !== 'cajero' && (
-          <View style={{ marginTop: 8 }}>
+          <View style={{ marginTop: 10, gap: 8 }}>
+            <Boton titulo={variantProductId === Number(item.id) ? 'Cerrar formulario de variante' : '＋ Agregar variante'} variante="outline" onPress={() => setVariantProductId(variantProductId === Number(item.id) ? null : Number(item.id))} deshabilitado={saving} />
+            {variantProductId === Number(item.id) && (
+              <View style={{ borderWidth: 1, borderColor: Colores.borde, backgroundColor: '#FAF9F6', borderRadius: 13, padding: 12, gap: 8 }}>
+                <Text style={Estilos.label}>SKU (opcional)</Text>
+                <TextInput style={Estilos.input} value={variantSku} onChangeText={setVariantSku} placeholder="Se genera automáticamente" placeholderTextColor="#94a3b8" />
+                <Text style={Estilos.label}>Talla</Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                  {['XS', 'S', 'M', 'L', 'XL', 'XXL', 'U', '34', '35', '36', '37', '38', '39', '40'].map((size) => <TouchableOpacity key={size} onPress={() => setVariantSize(size)} style={{ paddingVertical: 8, paddingHorizontal: 10, borderRadius: 9, backgroundColor: variantSize === size ? Colores.oscuro : '#E9E8E3' }}><Text style={{ color: variantSize === size ? '#fff' : Colores.texto, fontWeight: '800', fontSize: 11 }}>{size}</Text></TouchableOpacity>)}
+                </View>
+                <Text style={Estilos.label}>Color</Text>
+                <TextInput style={Estilos.input} value={variantColor} onChangeText={setVariantColor} placeholder="rojo" placeholderTextColor="#94a3b8" />
+                <TextInput style={Estilos.input} value={variantColorHex} onChangeText={setVariantColorHex} autoCapitalize="none" placeholder="Color HEX" placeholderTextColor="#94a3b8" />
+                <TextInput style={Estilos.input} value={variantPrice} onChangeText={setVariantPrice} keyboardType="decimal-pad" placeholder="Precio adicional (Bs.)" placeholderTextColor="#94a3b8" />
+                <Boton titulo={saving ? 'Guardando…' : 'Guardar variante'} variante="acento" onPress={() => void crearVariante(Number(item.id))} deshabilitado={saving || !variantColor.trim() || !Number.isFinite(Number(variantPrice || 0))} />
+              </View>
+            )}
             <Boton titulo="Desactivar producto" variante="peligro" onPress={() => Alert.alert('Desactivar producto', 'El producto dejará de aparecer en el catálogo.', [{ text: 'Cancelar', style: 'cancel' }, { text: 'Desactivar', style: 'destructive', onPress: () => void (async () => {
               try { await apiFetch(`/catalogo/productos/${Number(item.id)}`, { method: 'DELETE', tenantSlug }); mostrarToast('Producto desactivado.'); await loadModule('productos'); }
               catch (cause) { setError(cause instanceof Error ? cause.message : 'No se pudo desactivar.'); }
@@ -697,6 +810,8 @@ export const PanelScreen: React.FC = () => {
     const dashboardSales = record(summary?.ventas);
     const dashboardInventory = record(summary?.inventario);
     const dashboardReservations = record(summary?.reservas);
+    const branchSales = rowsOf(summary?.ventas_por_sucursal);
+    const topProducts = rowsOf(summary?.top_productos);
     const subscriptionUsage = record(summary?.cuotas);
     const userUsage = record(subscriptionUsage.usuarios);
     const branchUsage = record(subscriptionUsage.sucursales);
@@ -746,13 +861,58 @@ export const PanelScreen: React.FC = () => {
         )}
 
         {module === 'dashboard' && summary && (
-          <Tarjeta>
-            <Text style={Estilos.h3}>{textOf(summary.tienda_nombre, 'Tablero de la tienda')}</Text>
-            <Text style={Estilos.texto}>Ventas confirmadas: {textOf(dashboardSales.ventas_confirmadas, '0')} · Pendientes: {textOf(dashboardSales.ventas_pendientes_pago, '0')}</Text>
-            <Text style={Estilos.texto}>Ingresos: {money(dashboardSales.ingresos_confirmados_bob)} · Ticket promedio: {money(dashboardSales.ticket_promedio_bob)}</Text>
-            <Text style={Estilos.texto}>Stock disponible: {textOf(dashboardInventory.unidades_disponibles, '0')} · Reservas activas: {textOf(dashboardReservations.reservas_activas, '0')}</Text>
-            <Text style={Estilos.texto}>Alertas de stock bajo: {rows.length}</Text>
-          </Tarjeta>
+          <>
+            <Tarjeta>
+              <Text style={Estilos.h3}>{textOf(summary.tienda_nombre, 'Tablero de la tienda')}</Text>
+              <Text style={Estilos.subtitulo}>Indicadores principales de la operación</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
+                <MetricTile label="Ventas confirmadas" value={textOf(dashboardSales.ventas_confirmadas, '0')} />
+                <MetricTile label="Ingresos confirmados" value={money(dashboardSales.ingresos_confirmados_bob)} />
+                <MetricTile label="Unidades disponibles" value={textOf(dashboardInventory.unidades_disponibles, '0')} />
+                <MetricTile label="Reservas activas" value={textOf(dashboardReservations.reservas_activas, '0')} />
+              </View>
+              <View style={{ marginTop: 12, gap: 5 }}>
+                <Text style={Estilos.texto}>Pendientes de pago: {textOf(dashboardSales.ventas_pendientes_pago, '0')}</Text>
+                <Text style={Estilos.texto}>Ticket promedio: {money(dashboardSales.ticket_promedio_bob)}</Text>
+                <Text style={Estilos.texto}>Stock físico: {textOf(dashboardInventory.unidades_fisicas, '0')} · Reservadas: {textOf(dashboardInventory.unidades_reservadas, '0')}</Text>
+                <Text style={Estilos.texto}>SKUs bajo mínimo: {textOf(dashboardInventory.skus_alerta_minimo, '0')}</Text>
+              </View>
+              <View style={{ marginTop: 12 }}>
+                {['admin', 'encargado'].includes(role) && (
+                  <Boton titulo="Abrir Reportes IA" variante="outline" onPress={() => openModule('reportes')} />
+                )}
+              </View>
+            </Tarjeta>
+
+            <Tarjeta>
+              <Text style={Estilos.h3}>Ventas por sucursal</Text>
+              {branchSales.length === 0 ? <Text style={Estilos.texto}>Todavía no hay ventas por sucursal.</Text> : branchSales.map((branch, index) => (
+                <View key={textOf(branch.sucursal_id, String(index))} style={{ paddingVertical: 9, borderBottomWidth: index === branchSales.length - 1 ? 0 : 1, borderBottomColor: Colores.borde, gap: 3 }}>
+                  <Text style={{ color: Colores.tinta, fontSize: 13, fontWeight: '800' }}>{textOf(branch.sucursal_nombre, `Sucursal ${index + 1}`)}</Text>
+                  <Text style={Estilos.texto}>{textOf(branch.cantidad_ventas, '0')} venta(s) · {money(branch.total_bob)}</Text>
+                </View>
+              ))}
+            </Tarjeta>
+
+            <Tarjeta>
+              <Text style={Estilos.h3}>Prendas más vendidas</Text>
+              {topProducts.length === 0 ? <Text style={Estilos.texto}>Todavía no hay productos vendidos.</Text> : topProducts.map((product, index) => (
+                <View key={textOf(product.id, String(index))} style={{ paddingVertical: 9, borderBottomWidth: index === topProducts.length - 1 ? 0 : 1, borderBottomColor: Colores.borde, gap: 3 }}>
+                  <Text style={{ color: Colores.tinta, fontSize: 13, fontWeight: '800' }}>{textOf(product.nombre, 'Producto')}</Text>
+                  <Text style={Estilos.subtitulo}>{textOf(product.codigo, 'Sin código')} · {textOf(product.unidades_vendidas, '0')} unidad(es)</Text>
+                  <Text style={Estilos.texto}>{money(product.ingresos_bob)} en ingresos</Text>
+                </View>
+              ))}
+            </Tarjeta>
+
+            <Tarjeta>
+              <Text style={Estilos.h3}>Alertas de reposición</Text>
+              <Text style={Estilos.subtitulo}>Productos con stock disponible igual o inferior al mínimo</Text>
+              <Text style={{ color: rows.length ? Colores.error : Colores.ok, fontWeight: '800', marginTop: 8 }}>
+                {rows.length ? `${rows.length} alerta(s) que requieren revisión` : 'Sin alertas críticas de stock'}
+              </Text>
+            </Tarjeta>
+          </>
         )}
 
         {module === 'pos' && (
@@ -823,11 +983,33 @@ export const PanelScreen: React.FC = () => {
         {module === 'productos' && (
           <Tarjeta>
             <Text style={Estilos.h3}>Crear producto</Text>
-            <Text style={Estilos.texto}>El servidor crea una variante inicial y su stock. La carga de fotos requiere la interfaz web.</Text>
-            <TextInput style={[Estilos.input, { marginTop: 8 }]} value={productName} onChangeText={setProductName} placeholder="Nombre del producto" placeholderTextColor="#94a3b8" />
-            <TextInput style={[Estilos.input, { marginTop: 8 }]} value={categoryId} onChangeText={setCategoryId} keyboardType="number-pad" placeholder={categories[0] ? `ID categoría (p. ej. ${textOf(categories[0].id)})` : 'ID de categoría'} placeholderTextColor="#94a3b8" />
-            <TextInput style={[Estilos.input, { marginTop: 8 }]} value={productPrice} onChangeText={setProductPrice} keyboardType="decimal-pad" placeholder="Precio base (BOB)" placeholderTextColor="#94a3b8" />
-            <View style={{ height: 8 }} /><Boton titulo="Crear producto" variante="acento" onPress={() => void crearProducto()} deshabilitado={saving || !online} />
+            <Text style={Estilos.texto}>Se crea una variante inicial, su stock y las rutas de foto/overlay AR según tipo y color. Los archivos gráficos forman parte del catálogo de recursos del servidor.</Text>
+            <Text style={[Estilos.label, { marginTop: 12 }]}>Nombre del producto</Text>
+            <TextInput style={Estilos.input} value={productName} onChangeText={setProductName} placeholder="Nombre del producto" placeholderTextColor="#94a3b8" />
+            <Text style={[Estilos.label, { marginTop: 10 }]}>Categoría</Text>
+            {categories.length > 0 && (
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
+                {categories.map((cat) => <TouchableOpacity key={String(cat.id)} onPress={() => setCategoryId(String(cat.id))} style={{ paddingHorizontal: 10, paddingVertical: 8, borderRadius: 9, backgroundColor: categoryId === String(cat.id) ? Colores.oscuro : '#E9E8E3' }}><Text style={{ color: categoryId === String(cat.id) ? '#fff' : Colores.texto, fontWeight: '800', fontSize: 10 }}>{textOf(cat.nombre)}</Text></TouchableOpacity>)}
+              </View>
+            )}
+            <TextInput style={Estilos.input} value={categoryId} onChangeText={setCategoryId} keyboardType="number-pad" placeholder="ID de categoría" placeholderTextColor="#94a3b8" />
+            <Text style={[Estilos.label, { marginTop: 10 }]}>Tipo de prenda</Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+              {['blusa', 'camiseta', 'cartera', 'chaqueta', 'falda', 'pantalon', 'vestido', 'zapato'].map((type) => <TouchableOpacity key={type} onPress={() => setProductType(type)} style={{ paddingHorizontal: 10, paddingVertical: 8, borderRadius: 9, backgroundColor: productType === type ? Colores.oscuro : '#E9E8E3' }}><Text style={{ color: productType === type ? '#fff' : Colores.texto, fontWeight: '800', fontSize: 10 }}>{type.toUpperCase()}</Text></TouchableOpacity>)}
+            </View>
+            <Text style={[Estilos.label, { marginTop: 10 }]}>Color inicial</Text>
+            <TextInput style={Estilos.input} value={productColor} onChangeText={setProductColor} placeholder="rojo" placeholderTextColor="#94a3b8" />
+            <Text style={[Estilos.label, { marginTop: 10 }]}>Precio base (BOB)</Text>
+            <TextInput style={Estilos.input} value={productPrice} onChangeText={setProductPrice} keyboardType="decimal-pad" placeholder="Precio base" placeholderTextColor="#94a3b8" />
+            <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
+              <View style={{ flex: 1 }}><Text style={Estilos.label}>Talla inicial</Text><TextInput style={Estilos.input} value={productSize} onChangeText={setProductSize} placeholder="M" placeholderTextColor="#94a3b8" /></View>
+              <View style={{ flex: 1 }}><Text style={Estilos.label}>Stock inicial</Text><TextInput style={Estilos.input} value={productStock} onChangeText={setProductStock} keyboardType="number-pad" placeholder="10" placeholderTextColor="#94a3b8" /></View>
+            </View>
+            <Text style={[Estilos.label, { marginTop: 10 }]}>Material</Text>
+            <TextInput style={Estilos.input} value={productMaterial} onChangeText={setProductMaterial} placeholder="Algodón Premium" placeholderTextColor="#94a3b8" />
+            <Text style={[Estilos.label, { marginTop: 10 }]}>Descripción</Text>
+            <TextInput style={[Estilos.input, { minHeight: 84, textAlignVertical: 'top' }]} value={productDescription} onChangeText={setProductDescription} multiline placeholder="Descripción del producto" placeholderTextColor="#94a3b8" />
+            <Boton titulo={saving ? 'Creando producto…' : 'Crear producto y variante inicial'} variante="acento" onPress={() => void crearProducto()} deshabilitado={saving || !online || !productName.trim() || !categoryId.trim() || !Number.isFinite(Number(productPrice)) || Number(productPrice) < 0} estilo={{ marginTop: 14 }} />
           </Tarjeta>
         )}
 
@@ -837,6 +1019,8 @@ export const PanelScreen: React.FC = () => {
             <TextInput style={Estilos.input} value={userName} onChangeText={setUserName} placeholder="Nombre completo" placeholderTextColor="#94a3b8" />
             <TextInput style={[Estilos.input, { marginTop: 8 }]} value={userEmail} onChangeText={setUserEmail} autoCapitalize="none" keyboardType="email-address" placeholder="Correo electrónico" placeholderTextColor="#94a3b8" />
             <TextInput style={[Estilos.input, { marginTop: 8 }]} value={userPassword} onChangeText={setUserPassword} secureTextEntry placeholder="Contraseña (mínimo 8 caracteres)" placeholderTextColor="#94a3b8" />
+            <TextInput style={[Estilos.input, { marginTop: 8 }]} value={userPhone} onChangeText={setUserPhone} keyboardType="phone-pad" placeholder="Teléfono (opcional)" placeholderTextColor="#94a3b8" />
+            <TextInput style={[Estilos.input, { marginTop: 8 }]} value={userBranchId} onChangeText={setUserBranchId} keyboardType="number-pad" placeholder="ID de sucursal (opcional)" placeholderTextColor="#94a3b8" />
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginVertical: 10 }}>
               {['admin', 'encargado', 'cajero', 'proveedor', 'cliente'].map((candidate) => <TouchableOpacity key={candidate} onPress={() => setUserRole(candidate)} style={{ borderRadius: 999, paddingVertical: 7, paddingHorizontal: 10, backgroundColor: userRole === candidate ? Colores.tinta : '#e2e8f0' }}><Text style={{ color: userRole === candidate ? '#fff' : Colores.tinta, fontWeight: '700' }}>{candidate}</Text></TouchableOpacity>)}
             </View>
@@ -876,13 +1060,26 @@ export const PanelScreen: React.FC = () => {
             <Text style={[Estilos.texto, { marginTop: 8, color: Colores.warn }]}>Los cambios inmediatos usan el proveedor de pruebas y no generan un cobro real.</Text>
           </Tarjeta>
         )}
-        {module === 'suscripcion' && plans.map((plan) => (
-          <Tarjeta key={textOf(plan.codigo)}>
-            <Text style={Estilos.h3}>{textOf(plan.nombre, textOf(plan.codigo))}</Text>
-            <Text style={Estilos.texto}>{money(plan.precio_mensual_bs)} mensual · hasta {textOf(plan.max_usuarios)} usuarios · {textOf(plan.max_sucursales)} sucursal(es)</Text>
-            <Boton titulo="Solicitar/aplicar cambio de plan de prueba" variante="outline" onPress={() => void act('/suscripcion/cambio', { plan_solicitado: textOf(plan.codigo), aplicar_sandbox: true }, 'Solicitud de cambio registrada en modo de pruebas.')} deshabilitado={saving || !online || textOf(plan.codigo) === textOf(summary?.plan_actual)} />
-          </Tarjeta>
-        ))}
+        {module === 'suscripcion' && plans.map((plan) => {
+          const actual = textOf(plan.codigo) === textOf(summary?.plan_actual);
+          const maxProducts = numberOf(plan.max_productos, 0);
+          return (
+            <Tarjeta key={textOf(plan.codigo)} style={actual ? { borderColor: '#D7B69C', borderWidth: 2 } : undefined}>
+              {actual ? <BadgeEstado estado="activo" /> : null}
+              <Text style={[Estilos.h3, { marginTop: actual ? 8 : 0 }]}>{textOf(plan.nombre, textOf(plan.codigo))}</Text>
+              <Text style={{ color: Colores.tinta, fontSize: 22, fontWeight: '900', marginBottom: 7 }}>{maxProducts >= 0 && Number(plan.precio_mensual_bs ?? plan.precio_mensual_bob) === 0 ? 'Gratis' : money(plan.precio_mensual_bs ?? plan.precio_mensual_bob)}<Text style={{ color: Colores.suave, fontSize: 12, fontWeight: '500' }}> / mes</Text></Text>
+              <Text style={Estilos.texto}>Usuarios: {textOf(plan.max_usuarios)} · Sucursales: {textOf(plan.max_sucursales)}</Text>
+              <Text style={Estilos.texto}>Productos: {maxProducts < 0 ? 'Ilimitados' : maxProducts}</Text>
+              {plan.descripcion ? <Text style={[Estilos.subtitulo, { marginTop: 5 }]}>{textOf(plan.descripcion, '')}</Text> : null}
+              {!actual && (
+                <View style={{ gap: 8, marginTop: 12 }}>
+                  <Boton titulo="Solicitar cambio (revisión comercial)" variante="outline" onPress={() => void act('/suscripcion/cambio', { plan_solicitado: textOf(plan.codigo), aplicar_sandbox: false }, 'Solicitud de cambio registrada para revisión comercial.')} deshabilitado={saving || !online} />
+                  <Boton titulo="Aplicar inmediatamente (Sandbox)" variante="acento" onPress={() => void act('/suscripcion/cambio', { plan_solicitado: textOf(plan.codigo), aplicar_sandbox: true }, 'Plan aplicado en Sandbox, sin cobro real.')} deshabilitado={saving || !online} />
+                </View>
+              )}
+            </Tarjeta>
+          );
+        })}
 
         {module === 'ml' && summary && (
           <View style={{ gap: 12 }}>
@@ -997,12 +1194,26 @@ export const PanelScreen: React.FC = () => {
           <View style={{ width: 9, height: 9, borderRadius: 5, backgroundColor: online ? Colores.ok : Colores.error }} />
           <Text style={Estilos.texto}>{online ? 'Conectado al servidor' : 'Sin conexión al servidor'}</Text>
         </View>
-        {allowedModules.map((item) => (
-          <TouchableOpacity key={item.id} accessibilityRole="button" onPress={() => openModule(item.id)} style={{ backgroundColor: '#fff', borderColor: Colores.borde, borderWidth: 1, borderRadius: 14, padding: 16, marginBottom: 10 }}>
-            <Text style={{ fontSize: 17, fontWeight: '800', color: Colores.tinta }}>{item.icono} {item.titulo}</Text>
-          </TouchableOpacity>
-        ))}
-        <View style={{ marginTop: 8 }}><Boton titulo="Registrar otra tienda" variante="outline" onPress={() => nav.push('Onboarding')} /></View>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', gap: 10 }}>
+          {allowedModules.map((item) => (
+            <TouchableOpacity key={item.id} accessibilityRole="button" onPress={() => openModule(item.id)} activeOpacity={0.84} style={{ width: moduleCardWidth, minHeight: 92, justifyContent: 'center', backgroundColor: '#FFFFFF', borderColor: Colores.borde, borderWidth: 1, borderRadius: 16, padding: 14 }}>
+              <Text style={{ fontSize: 22, marginBottom: 8 }}>{item.icono}</Text>
+              <Text style={{ fontSize: 13, lineHeight: 18, fontWeight: '900', color: Colores.tinta }}>{item.titulo}</Text>
+              <Text style={{ fontSize: 10, color: Colores.suave, marginTop: 3 }}>Abrir módulo →</Text>
+            </TouchableOpacity>
+          ))}
+          {['admin', 'encargado'].includes(role) && (
+            <TouchableOpacity accessibilityRole="button" onPress={() => nav.push('Maestros')} activeOpacity={0.84} style={{ width: moduleCardWidth, minHeight: 92, justifyContent: 'center', backgroundColor: '#FBF5EF', borderColor: '#E7D5C7', borderWidth: 1, borderRadius: 16, padding: 14 }}>
+              <Text style={{ fontSize: 22, marginBottom: 8 }}>🏷️</Text>
+              <Text style={{ fontSize: 13, lineHeight: 18, fontWeight: '900', color: Colores.tinta }}>Maestros comerciales</Text>
+              <Text style={{ fontSize: 10, color: Colores.suave, marginTop: 3 }}>Sucursales · Promos · Categorías</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+        <View style={{ marginTop: 8, gap: 8 }}>
+          <Boton titulo="Notificaciones" variante="outline" onPress={() => nav.push('Notificaciones')} />
+          <Boton titulo="Registrar otra tienda" variante="outline" onPress={() => nav.push('Onboarding')} />
+        </View>
       </ScrollView>
     );
   }
@@ -1010,7 +1221,7 @@ export const PanelScreen: React.FC = () => {
   return (
     <FlatList
       style={Estilos.contenedor}
-      contentContainerStyle={{ padding: 16, paddingBottom: 36 }}
+      contentContainerStyle={{ padding: 16, paddingBottom: 36, width: '100%', maxWidth: 980, alignSelf: 'center' }}
       data={rows}
       keyExtractor={(item, index) => `${module}-${textOf(item.id || item.operacion_id || item.sku || item.variante_id, String(index))}`}
       renderItem={renderRow}

@@ -8,7 +8,7 @@ El pipeline de este repositorio genera un **APK de la variante RELEASE** en un a
 - Variante Android `release`, con `assets/index.android.bundle` incluido; no necesita Metro ni una PC para servir JavaScript.
 - `applicationId` esperado: `bo.fashionstore.app`.
 - URL de NestJS Azure incorporada en el bundle desde `EXPO_PUBLIC_API_URL`.
-- APK firmado para pruebas internas con una clave de CI temporal. No es la clave de firma estable para Google Play.
+- APK firmado con el mismo keystore privado en Azure cuando se configuran los cuatro secretos de firma. La clave temporal queda solo como fallback de prueba y no conserva la identidad entre agentes hospedados.
 - Artefacto Azure Pipelines llamado `FashionStore-APK`, con el APK y `INFORMACION-BUILD.txt` (commit, versión, tamaño y SHA-256).
 
 ## Configuración única en Azure DevOps Services
@@ -31,18 +31,32 @@ El pipeline de este repositorio genera un **APK de la variante RELEASE** en un a
 5. Ejecuta `tsc --noEmit`.
 6. Asigna un `versionCode` de CI superior al valor base sin modificar el archivo versionado en Git.
 7. Ejecuta `expo prebuild --platform android --clean --no-install`, con `EAS_BUILD_PROFILE=azure` para desactivar el permiso de tráfico HTTP plano.
-8. Genera una clave temporal de pruebas en el agente y asigna esa firma al build type `release`.
+8. Aplica la configuración de firma al build type `release`: reutiliza el keystore persistente configurado en el grupo de variables o, solo para pruebas, genera una clave temporal.
 9. Gradle ejecuta `:app:assembleRelease`.
 10. El script comprueba la firma con `apksigner`, alineación con `zipalign`, paquete/versión con `aapt`, integridad ZIP y existencia de `assets/index.android.bundle`. También verifica que el bundle contenga la URL pública de API configurada.
 11. En el resumen de la ejecución, abre **Published → FashionStore-APK** y descarga el artefacto. Dentro estará `FashionStore-<version>-<BuildId>.apk`.
 
 ## Firma y actualizaciones
 
-Por defecto, el agente crea una clave temporal para que el APK se pueda instalar en un dispositivo de prueba sin configurar una cuenta de tienda. El agente Microsoft-hosted es efímero; por tanto, la clave puede cambiar entre ejecuciones y Android puede rechazar una actualización sobre la instalación anterior. En ese caso desinstala el APK anterior antes de instalar el nuevo.
+Para que las nuevas versiones se instalen **encima de la versión anterior sin desinstalarla**, debes conservar la misma clave privada de firma. El pipeline admite esa identidad estable mediante estas variables del grupo `fashionstore-mobile` (las cuatro contraseñas/valores deben ser secretos donde corresponda):
 
-Para actualizar la misma instalación sin desinstalar, configurar una clave de firma persistente como **Secure File** de Azure DevOps y adaptar el bloque de firma del script para utilizar ese keystore. Nunca subas el keystore ni sus contraseñas a GitHub ni los incluyas en el ZIP.
+- `ANDROID_KEYSTORE_BASE64`: contenido Base64 del keystore privado (`.jks` o `.keystore`), almacenado como variable secreta.
+- `ANDROID_KEYSTORE_PASSWORD`: contraseña del keystore (secreta).
+- `ANDROID_KEY_ALIAS`: alias de la clave.
+- `ANDROID_KEY_PASSWORD`: contraseña de la clave (secreta).
 
-Este APK RELEASE firmado con clave interna de pruebas no debe subirse a Google Play. Para Google Play se requiere una upload key privada estable y configurar la firma de release correspondiente.
+Genera el keystore **una sola vez** en una máquina protegida y guarda una copia de respaldo cifrada. Ejemplo (personaliza el alias y resguarda las contraseñas):
+
+```bash
+keytool -genkeypair -v -keystore fashionstore-release.keystore -alias fashionstore -keyalg RSA -keysize 2048 -validity 10000
+base64 -w 0 fashionstore-release.keystore
+```
+
+Copia el resultado Base64 al secreto `ANDROID_KEYSTORE_BASE64` y completa las otras tres variables. No regeneres el keystore entre versiones, no lo guardes en el repositorio, ni lo incluyas en el APK. El script detecta esas variables y firma con la clave persistente. El pipeline no imprime su contenido ni sus contraseñas.
+
+Si no configuras las variables, el pipeline usa una clave de CI temporal para permitir una compilación de prueba. Ese APK se puede instalar, pero su firma puede cambiar entre ejecuciones y Android puede exigir desinstalar la versión anterior antes de instalarlo. El archivo `INFORMACION-BUILD.txt` identifica el tipo de firma utilizado.
+
+La clave de pruebas no debe utilizarse para Google Play. Para Play configura una upload key estable, con custodia y política de respaldo propia.
 
 ## Costos y límites
 

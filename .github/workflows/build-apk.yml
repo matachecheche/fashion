@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   apk:
-    name: APK release firmado (clave CI temporal)
+    name: APK release firmado (keystore persistente si está configurado)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -24,6 +24,10 @@ jobs:
       EXPO_PUBLIC_DEFAULT_TENANT_SLUG: legacy
       BUILD_BUILDID: ${{ github.run_number }}
       BUILD_SOURCEVERSION: ${{ github.sha }}
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
       BUILD_ARTIFACTSTAGINGDIRECTORY: ${{ github.workspace }}/artifacts/FashionStore-APK
     steps:
       - uses: actions/checkout@v4

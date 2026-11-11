@@ -5,6 +5,7 @@ import {
   Text,
   TouchableOpacity,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import { apiFetch } from '../api';
 import { apiAssetUrl } from '../config';
@@ -16,6 +17,8 @@ export const ProductoScreen: React.FC<{ navParams?: any }> = ({ navParams }) => 
   const productoId: number = Number(navParams?.productoId);
   const { tenantSlug, agregarAlCarrito } = useApp();
   const nav = useNav();
+  const { width: windowWidth } = useWindowDimensions();
+  const imageHeight = Math.min(480, Math.max(220, windowWidth * 0.88));
   const [producto, setProducto] = useState<any | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [varianteSel, setVarianteSel] = useState<any | null>(null);
@@ -54,7 +57,7 @@ export const ProductoScreen: React.FC<{ navParams?: any }> = ({ navParams }) => 
         source={{ uri: apiAssetUrl(imagen) }}
         style={{
           width: '100%',
-          height: 340,
+          height: imageHeight,
           borderRadius: 16,
           backgroundColor: '#f1f5f9',
           borderWidth: 1,

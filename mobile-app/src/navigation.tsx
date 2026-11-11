@@ -17,7 +17,9 @@ export type ScreenName =
   | 'Asistente'
   | 'Ayuda'
   | 'Onboarding'
-  | 'Panel';
+  | 'Panel'
+  | 'Maestros'
+  | 'Notificaciones';
 
 export interface StackEntry {
   name: ScreenName;

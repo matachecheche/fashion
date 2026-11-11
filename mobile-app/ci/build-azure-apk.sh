@@ -162,31 +162,66 @@ fi
 # Create a temporary CI-only key and explicitly sign the RELEASE variant with it.
 # This gives an installable standalone APK with its JS bundle (no Metro server).
 # For stable upgrades between builds, replace this key with an Azure Secure File.
-DEBUG_KEYSTORE="$HOME/.android/debug.keystore"
-mkdir -p "$(dirname "$DEBUG_KEYSTORE")"
-if [[ ! -s "$DEBUG_KEYSTORE" ]]; then
-  keytool -genkeypair -v \
-    -keystore "$DEBUG_KEYSTORE" \
-    -storepass android \
-    -alias androiddebugkey \
-    -keypass android \
-    -keyalg RSA -keysize 2048 -validity 10000 \
-    -dname "CN=FashionStore CI Debug,O=FashionStore,C=BO" \
-    >/dev/null 2>&1
+# Prefer a stable Azure secret keystore so each APK can update the installed app.
+# For a first smoke-test build only, fall back to a temporary signing key.
+normalize_azure_macro() {
+  local value="${1:-}"
+  if [[ "$value" =~ ^\$\([A-Za-z0-9_]+\)$ ]]; then value=""; fi
+  printf '%s' "$value"
+}
+ANDROID_KEYSTORE_BASE64="$(normalize_azure_macro "${ANDROID_KEYSTORE_BASE64:-}")"
+ANDROID_KEYSTORE_PASSWORD="$(normalize_azure_macro "${ANDROID_KEYSTORE_PASSWORD:-}")"
+ANDROID_KEY_ALIAS="$(normalize_azure_macro "${ANDROID_KEY_ALIAS:-}")"
+ANDROID_KEY_PASSWORD="$(normalize_azure_macro "${ANDROID_KEY_PASSWORD:-}")"
+
+if [[ -n "$ANDROID_KEYSTORE_BASE64" ]]; then
+  [[ -n "$ANDROID_KEYSTORE_PASSWORD" && -n "$ANDROID_KEY_ALIAS" && -n "$ANDROID_KEY_PASSWORD" ]] || \
+    fail "Para firma estable define ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS y ANDROID_KEY_PASSWORD junto con ANDROID_KEYSTORE_BASE64."
+  SIGNING_KEYSTORE="${AGENT_TEMPDIRECTORY:-/tmp}/fashionstore-release.keystore"
+  printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$SIGNING_KEYSTORE" || fail "ANDROID_KEYSTORE_BASE64 no es Base64 válido."
+  [[ -s "$SIGNING_KEYSTORE" ]] || fail "El keystore de Azure está vacío."
+  SIGNING_MODE="keystore persistente de Azure"
+else
+  DEBUG_KEYSTORE="$HOME/.android/debug.keystore"
+  mkdir -p "$(dirname "$DEBUG_KEYSTORE")"
+  if [[ ! -s "$DEBUG_KEYSTORE" ]]; then
+    keytool -genkeypair -v \
+      -keystore "$DEBUG_KEYSTORE" \
+      -storepass android \
+      -alias androiddebugkey \
+      -keypass android \
+      -keyalg RSA -keysize 2048 -validity 10000 \
+      -dname "CN=FashionStore CI Debug,O=FashionStore,C=BO" \
+      >/dev/null 2>&1
+  fi
+  SIGNING_KEYSTORE="$DEBUG_KEYSTORE"
+  ANDROID_KEYSTORE_PASSWORD="android"
+  ANDROID_KEY_ALIAS="androiddebugkey"
+  ANDROID_KEY_PASSWORD="android"
+  SIGNING_MODE="clave temporal de CI (no permite actualización sobre otra firma)"
+  log "AVISO: no se configuró keystore persistente. Este APK es instalable, pero puede requerir desinstalar la versión previa para actualizar."
 fi
 
+export ANDROID_KEYSTORE_FILE="$SIGNING_KEYSTORE"
+export ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD
 cat > "$MOBILE_DIR/android/app/fashionstore-ci-signing.gradle" <<'GRADLE'
-def fashionStoreCiKeystore = new File(System.getProperty('user.home'), '.android/debug.keystore')
-if (!fashionStoreCiKeystore.isFile()) {
-    throw new GradleException('No existe el keystore temporal de CI: ' + fashionStoreCiKeystore)
+def fsKeystore = System.getenv('ANDROID_KEYSTORE_FILE')
+def fsStorePassword = System.getenv('ANDROID_KEYSTORE_PASSWORD')
+def fsKeyAlias = System.getenv('ANDROID_KEY_ALIAS')
+def fsKeyPassword = System.getenv('ANDROID_KEY_PASSWORD')
+if (![fsKeystore, fsStorePassword, fsKeyAlias, fsKeyPassword].every { it }) {
+    throw new GradleException('Faltan variables de firma Android para FashionStore.')
+}
+if (!new File(fsKeystore).isFile()) {
+    throw new GradleException('No existe el keystore Android configurado: ' + fsKeystore)
 }
 android {
     signingConfigs {
         release {
-            storeFile fashionStoreCiKeystore
-            storePassword 'android'
-            keyAlias 'androiddebugkey'
-            keyPassword 'android'
+            storeFile file(fsKeystore)
+            storePassword fsStorePassword
+            keyAlias fsKeyAlias
+            keyPassword fsKeyPassword
         }
     }
     buildTypes {
@@ -196,8 +231,11 @@ android {
     }
 }
 GRADLE
-if ! grep -Fq 'fashionstore-ci-signing.gradle' "$APP_GRADLE"; then
-  printf '\n// Signing for installable Azure CI release APK (temporary test key).\napply from: "./fashionstore-ci-signing.gradle"\n' >> "$APP_GRADLE"
+
+# Expo Prebuild recreates android/ on every run. Attach our release signing
+# configuration after the Android application plugin has declared its DSL.
+if ! grep -Fq "fashionstore-ci-signing.gradle" "$APP_GRADLE"; then
+  printf "\n// Firma release de FashionStore (inyectada por CI).\napply from: file(\"\$projectDir/fashionstore-ci-signing.gradle\")\n" >> "$APP_GRADLE"
 fi
 
 log "Compilando variante RELEASE autocontenida mediante Gradle."
@@ -239,7 +277,7 @@ Build Azure Pipelines: ${BUILD_BUILDID:-local}
 Commit: ${BUILD_SOURCEVERSION:-local}
 API incorporada: $API_BASE_URL
 Variante: release APK autónomo (incluye assets/index.android.bundle)
-Firma: clave CI temporal para pruebas internas; no es una clave de Google Play.
+Firma: $SIGNING_MODE. Para actualizaciones consecutivas se recomienda keystore persistente; Google Play requiere configurar una clave de producción protegida.
 Tamaño: $APK_BYTES bytes
 SHA-256: $APK_SHA256
 EOF

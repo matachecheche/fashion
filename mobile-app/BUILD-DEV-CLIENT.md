@@ -16,7 +16,7 @@ npm start
 
 La compilación real en nube Azure usa el pipeline `/azure-pipelines-apk.yml` del repositorio. Consulta [`docs/APK-AZURE.md`](../docs/APK-AZURE.md). La primera configuración crea una vez el pipeline y el grupo de variables `fashionstore-mobile` con `EXPO_PUBLIC_API_URL`; después basta pulsar **Run pipeline** y descargar el artefacto `FashionStore-APK`.
 
-El pipeline valida la API, TypeScript, Expo Prebuild, Gradle, integridad ZIP y firma del APK. Produce un APK `debug` para pruebas internas. La clave debug del agente es temporal, así que no ofrece identidad de firma estable entre builds; para distribución y actualizaciones se debe configurar un keystore privado como Secure File y compilar un perfil release.
+El pipeline valida la API, TypeScript, Expo Prebuild, Gradle, integridad ZIP y firma del APK. Produce un APK `release` autónomo. Para instalar versiones nuevas encima de la anterior, configura las variables seguras `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` y `ANDROID_KEY_PASSWORD` en el grupo `fashionstore-mobile`; sin ellas el pipeline utiliza una clave temporal de prueba.
 
 ## Alternativa EAS
 

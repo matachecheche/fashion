@@ -1,6 +1,6 @@
 # Progreso de cierre — FashionStore
 
-**Última actualización:** 10 de noviembre de 2026  
+**Última actualización:** 11 de noviembre de 2026  
 **Estado global:** regresiones locales de backend y DB ejecutadas satisfactoriamente en el stack actual; la entrega sigue **incompleta frente a la aceptación normativa y los entornos pendientes**. No declarar CU-01–CU-21, D1–D9 ni T-01–T-20 aprobados.
 
 ## Alcance preservado y cambios
@@ -58,5 +58,25 @@
 - El pipeline Azure anterior usaba `assembleDebug`, que no es adecuado para entregar un APK autónomo sin Metro en una app React Native/Expo.
 - Se sustituyó por `:app:assembleRelease` y se añadió `mobile-app/ci/build-azure-apk.sh`.
 - El build inyecta `EAS_BUILD_PROFILE=azure`, valida el healthcheck público, instala el toolchain Expo SDK 54 (Node 20.19, JDK 17, Android 36 y NDK 27.1), genera una clave temporal de pruebas y verifica firma, alineación, paquete, versionCode, bundle JS y URL de API.
-- El APK se publica como artefacto `FashionStore-APK`. La firma temporal sirve para instalación de pruebas; para actualizaciones sin desinstalar debe configurarse una clave persistente como Secure File de Azure DevOps.
+- El APK se publica como artefacto `FashionStore-APK`. La firma temporal sirve para instalación de pruebas; para actualizaciones sin desinstalar debe configurarse un keystore persistente mediante las variables seguras `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` y `ANDROID_KEY_PASSWORD` del grupo `fashionstore-mobile`.
 - Verificación local: `bash -n mobile-app/ci/build-azure-apk.sh`, parseo del YAML y 109 pruebas automatizadas superadas. La compilación Gradle real debe ejecutarse en Azure DevOps porque este entorno no puede resolver el registro npm ni tiene Android SDK instalado.
+
+## Versión móvil 2.1.0 — Rediseño y paridad funcional
+
+- Rediseño del sistema visual compartido, navegación adaptativa de cinco pestañas y zona segura para Android.
+- Mejora de Inicio, Catálogo, Cuenta, Panel operativo y Vestidor AR; tarjetas, controles y distribuciones adaptadas al ancho del dispositivo.
+- Se agregaron los módulos móviles de Maestros Comerciales y Notificaciones, junto con edición de perfil y cambio de contraseña.
+- El formulario de producto del panel permite crear la variante inicial y registrar variantes adicionales.
+- Se subió la versión de app a `2.1.0` y el `versionCode` base Android a `23`.
+- El pipeline ahora integra explícitamente la configuración de firma release al Gradle generado por Expo y permite mantener la misma firma entre builds mediante secretos de Azure.
+- La verificación local de TypeScript/Expo no pudo completarse en este entorno porque `npm ci` no terminó de instalar dependencias; el parseo TS/TSX y la sintaxis Bash sí se validaron.
+
+
+## Verificación final de la entrega móvil — 11 de noviembre de 2026
+
+- Paridad de navegación: las rutas web de tienda (inicio, catálogo, producto, vestidor, carrito, checkout, pago, autenticación, ayuda, pedidos, reservas y perfil) tienen pantallas/rutas móviles equivalentes; el panel móvil cubre dashboard, POS, ventas, reservas, inventario, productos, maestros comerciales, propuestas, reportes, suscripción, usuarios y analítica ML.
+- Se amplió el detalle de pedidos con comprobante y líneas de venta; las reservas muestran las prendas asociadas y expiración. Se añadieron edición de perfil, cambio de contraseña y notificaciones.
+- Suite local ejecutada en esta entrega: `tools/test_ui_presentation.py` (10/10), `tools/test_azure_apk_build.py` (10/10) y `tools/test_packaging.py` (12/12). El script Azure pasa `bash -n`; ambos YAML de CI y los JSON de configuración parsean correctamente.
+- Parseo TypeScript/TSX con `transpileModule`: 28/28 archivos sin errores de sintaxis y sin imports relativos rotos. Esto no sustituye `tsc --noEmit` con todas las dependencias instaladas.
+- `npm ci` no pudo terminar en este entorno porque no se pudo resolver/descargar desde `registry.npmjs.org`; por tanto no se declara typecheck integral ni compilación Gradle/Expo completada aquí. Además, no hay Android SDK ni configuración de API/keystore de la organización para producir y probar un APK real en esta sesión.
+- El workflow Azure está preparado para producir `FashionStore-<versión>-<BuildId>.apk` como RELEASE autónomo, pero el propietario aún debe configurar el grupo de variables `fashionstore-mobile`, el endpoint público HTTPS de NestJS y una clave privada de firma estable, y ejecutar el pipeline dentro de su Azure DevOps.

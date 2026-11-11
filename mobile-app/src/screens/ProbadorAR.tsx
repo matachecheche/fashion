@@ -17,7 +17,7 @@ import * as Haptics from 'expo-haptics';
 import * as Sharing from 'expo-sharing';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Dimensions,
+  useWindowDimensions,
   Image,
   Modal,
   PanResponder,
@@ -39,11 +39,13 @@ const TIPOS = ['blusa', 'camiseta', 'cartera', 'chaqueta', 'falda', 'pantalon', 
 const COLORES = ['azul', 'beige', 'blanco', 'camel', 'celeste', 'gris', 'mostaza', 'negro', 'rojo', 'rosado', 'verde', 'vino'];
 const LOOKS_KEY = 'fs_mobile_looks_v1';
 
-const { width: SCREEN_W } = Dimensions.get('window');
-
 export const ProbadorARScreen: React.FC<{ navParams?: any }> = ({ navParams }) => {
   const { tenantSlug, mostrarToast } = useApp();
   const nav = useNav();
+  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
+  const canvasHeight = Math.min(500, Math.max(320, screenHeight * 0.43));
+  const overlayWidth = Math.min(220, Math.max(170, screenWidth - 76));
+  const overlayHeight = overlayWidth * 1.41;
   const [permiso, solicitarPermiso] = useCameraPermissions();
   const [tipo, setTipo] = useState<string>(navParams?.tipo || 'vestido');
   const [color, setColor] = useState<string>(navParams?.color || 'rojo');
@@ -169,7 +171,7 @@ export const ProbadorARScreen: React.FC<{ navParams?: any }> = ({ navParams }) =
       {/* Lienzo AR */}
       <View
         style={{
-          height: 420,
+          height: canvasHeight,
           borderRadius: 18,
           overflow: 'hidden',
           backgroundColor: '#0f172a',
@@ -185,8 +187,8 @@ export const ProbadorARScreen: React.FC<{ navParams?: any }> = ({ navParams }) =
             {/* Silueta de referencia (fallback sin cámara) */}
             <View
               style={{
-                width: 150,
-                height: 300,
+                width: Math.min(150, screenWidth * 0.42),
+                height: Math.min(300, canvasHeight * 0.72),
                 borderRadius: 80,
                 borderWidth: 6,
                 borderColor: '#475569',
@@ -202,7 +204,7 @@ export const ProbadorARScreen: React.FC<{ navParams?: any }> = ({ navParams }) =
                   borderRadius: 32,
                   borderWidth: 5,
                   borderColor: '#475569',
-                  marginTop: -210,
+                  marginTop: -Math.min(210, canvasHeight * 0.5),
                 }}
               />
             </View>
@@ -219,10 +221,10 @@ export const ProbadorARScreen: React.FC<{ navParams?: any }> = ({ navParams }) =
           resizeMode="contain"
           style={{
             position: 'absolute',
-            width: 220,
-            height: 310,
-            left: SCREEN_W / 2 - 110 + offset.x,
-            top: 70 + offset.y,
+            width: overlayWidth,
+            height: overlayHeight,
+            left: (screenWidth - 36 - overlayWidth) / 2 + offset.x,
+            top: Math.max(28, canvasHeight * 0.16) + offset.y,
             transform: [{ scale: escala }],
           }}
         />

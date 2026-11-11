@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { FlatList, Text, TextInput, View, TouchableOpacity } from 'react-native';
+import { ActivityIndicator, FlatList, Text, TextInput, View, TouchableOpacity } from 'react-native';
 import { apiFetch } from '../api';
 import { useApp } from '../context';
 import { Colores, Encabezado, Estilos } from '../ui';
@@ -78,7 +78,7 @@ export const AsistenteScreen: React.FC = () => {
 
   return (
     <View style={{ flex: 1, backgroundColor: Colores.fondo }}>
-      <View style={{ padding: 16, paddingBottom: 0 }}>
+      <View style={{ width: '100%', maxWidth: 980, alignSelf: 'center', paddingHorizontal: 16, paddingTop: 16, paddingBottom: 0 }}>
         <Encabezado titulo="🤖 Asistente inteligente" subtitulo="Responde dudas y consulta datos autorizados de tu tienda." />
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
           {SUGERENCIAS.map((s) => (
@@ -97,7 +97,8 @@ export const AsistenteScreen: React.FC = () => {
         data={mensajes}
         keyExtractor={(m) => m.id}
         keyboardShouldPersistTaps="handled"
-        contentContainerStyle={{ padding: 16, gap: 10 }}
+        contentContainerStyle={{ padding: 16, gap: 10, width: '100%', maxWidth: 980, alignSelf: 'center', flexGrow: 1 }}
+        ListFooterComponent={cargando ? <View style={{ alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: '#FFFFFF', borderRadius: 14, borderWidth: 1, borderColor: Colores.borde, padding: 12 }}><ActivityIndicator size="small" color={Colores.acento} /><Text style={Estilos.subtitulo}>El asistente está escribiendo…</Text></View> : null}
         renderItem={({ item }) => (
           <View
             style={{
@@ -142,8 +143,9 @@ export const AsistenteScreen: React.FC = () => {
           backgroundColor: '#fff',
         }}
       >
+        <View style={{ width: '100%', maxWidth: 948, alignSelf: 'center', flexDirection: 'row', gap: 8 }}>
         <TextInput
-          style={[Estilos.input, { flex: 1 }]}
+          style={[Estilos.input, { flex: 1, minWidth: 0 }]}
           placeholder="Escribe tu pregunta…"
           placeholderTextColor="#94a3b8"
           value={texto}
@@ -153,10 +155,13 @@ export const AsistenteScreen: React.FC = () => {
         />
         <TouchableOpacity
           onPress={() => enviar()}
-          style={{ backgroundColor: Colores.acento, borderRadius: 10, paddingHorizontal: 18, justifyContent: 'center' }}
+          disabled={cargando || !texto.trim()}
+          accessibilityRole="button"
+          style={{ minWidth: 82, minHeight: 50, backgroundColor: cargando || !texto.trim() ? Colores.suave : Colores.acento, borderRadius: 13, paddingHorizontal: 16, justifyContent: 'center', alignItems: 'center' }}
         >
           <Text style={{ color: '#fff', fontWeight: '800' }}>Enviar</Text>
         </TouchableOpacity>
+        </View>
       </View>
     </View>
   );

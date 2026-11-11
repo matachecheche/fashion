@@ -135,7 +135,8 @@ class AzureStandaloneApkTests(unittest.TestCase):
     def test_pipeline_documentation_explains_ephemeral_signing(self) -> None:
         self.assertIn("clave temporal", self.doc)
         self.assertIn("assets/index.android.bundle", self.doc)
-        self.assertIn("Secure File", self.doc)
+        self.assertIn("ANDROID_KEYSTORE_BASE64", self.doc)
+        self.assertIn("keystore persistente", self.doc)
 
     def test_pipeline_yaml_parses(self) -> None:
         try:

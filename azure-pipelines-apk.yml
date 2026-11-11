@@ -69,6 +69,10 @@ steps:
       AGENT_TEMPDIRECTORY: $(Agent.TempDirectory)
       BUILD_BUILDID: $(Build.BuildId)
       BUILD_SOURCEVERSION: $(Build.SourceVersion)
+      ANDROID_KEYSTORE_BASE64: $(ANDROID_KEYSTORE_BASE64)
+      ANDROID_KEYSTORE_PASSWORD: $(ANDROID_KEYSTORE_PASSWORD)
+      ANDROID_KEY_ALIAS: $(ANDROID_KEY_ALIAS)
+      ANDROID_KEY_PASSWORD: $(ANDROID_KEY_PASSWORD)
 
   - task: PublishPipelineArtifact@1
     displayName: Publish installable FashionStore APK

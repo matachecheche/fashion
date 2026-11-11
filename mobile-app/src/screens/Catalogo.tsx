@@ -7,6 +7,7 @@ import {
   TextInput,
   TouchableOpacity,
   View,
+  useWindowDimensions,
 } from 'react-native';
 import { apiFetch, pullCatalogSuite } from '../api';
 import { apiAssetUrl } from '../config';
@@ -19,6 +20,11 @@ const TIPOS = ['todos', 'blusa', 'camiseta', 'cartera', 'chaqueta', 'falda', 'pa
 export const CatalogoScreen: React.FC = () => {
   const { tenantSlug } = useApp();
   const nav = useNav();
+  const { width: windowWidth } = useWindowDimensions();
+  const contentWidth = Math.max(0, Math.min(windowWidth - 36, 944));
+  const columns = windowWidth < 340 ? 1 : windowWidth < 760 ? 2 : 3;
+  const gap = 12;
+  const cardWidth = Math.max(132, (contentWidth - gap * (columns - 1)) / columns);
   const [productos, setProductos] = useState<any[]>([]);
   const [q, setQ] = useState('');
   const [tipo, setTipo] = useState<(typeof TIPOS)[number]>('todos');
@@ -59,7 +65,7 @@ export const CatalogoScreen: React.FC = () => {
 
   return (
     <View style={Estilos.contenedor}>
-      <View style={{ padding: 16, paddingBottom: 8 }}>
+      <View style={{ width: '100%', maxWidth: 980, alignSelf: 'center', paddingHorizontal: 18, paddingTop: 18, paddingBottom: 8 }}>
         <Encabezado
           titulo="👗 Catálogo"
           subtitulo={offline ? 'Caché local (offline)' : `Tenant: /tienda/${tenantSlug}`}
@@ -72,17 +78,19 @@ export const CatalogoScreen: React.FC = () => {
           onChangeText={setQ}
           autoCapitalize="none"
         />
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 10 }}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 12 }} contentContainerStyle={{ gap: 8, paddingRight: 6 }}>
           {TIPOS.map((t) => (
             <TouchableOpacity
               key={t}
               onPress={() => setTipo(t)}
               style={{
-                paddingHorizontal: 12,
-                paddingVertical: 7,
+                minHeight: 38,
+                paddingHorizontal: 14,
+                paddingVertical: 9,
                 borderRadius: 999,
-                marginRight: 8,
-                backgroundColor: tipo === t ? Colores.tinta : '#e2e8f0',
+                backgroundColor: tipo === t ? Colores.oscuro : '#FFFFFF',
+                borderWidth: 1,
+                borderColor: tipo === t ? Colores.oscuro : Colores.borde,
               }}
             >
               <Text
@@ -104,17 +112,17 @@ export const CatalogoScreen: React.FC = () => {
           <ActivityIndicator size="large" color={Colores.acento} />
         </View>
       ) : (
-        <ScrollView contentContainerStyle={{ padding: 16, paddingTop: 4 }}>
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}>
+        <ScrollView contentContainerStyle={{ width: '100%', maxWidth: 980, alignSelf: 'center', paddingHorizontal: 18, paddingTop: 8, paddingBottom: 30 }}>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap }}>
             {productos.map((p) => (
               <TouchableOpacity
                 key={p.id}
                 activeOpacity={0.85}
                 onPress={() => nav.push('Producto', { productoId: p.id })}
                 style={{
-                  width: '47%',
-                  backgroundColor: '#fff',
-                  borderRadius: 14,
+                  width: cardWidth,
+                  backgroundColor: '#FFFFFF',
+                  borderRadius: 17,
                   overflow: 'hidden',
                   borderWidth: 1,
                   borderColor: Colores.borde,
@@ -122,17 +130,17 @@ export const CatalogoScreen: React.FC = () => {
               >
                 <Image
                   source={{ uri: apiAssetUrl(p.imagen_url) }}
-                  style={{ width: '100%', height: 150, backgroundColor: '#f1f5f9' }}
+                  style={{ width: '100%', height: Math.min(220, cardWidth * 1.08), backgroundColor: Colores.superficie }}
                   resizeMode="cover"
                 />
-                <View style={{ padding: 8 }}>
-                  <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: '800', color: Colores.tinta }}>
+                <View style={{ padding: 11 }}>
+                  <Text numberOfLines={2} style={{ fontSize: 13, lineHeight: 18, fontWeight: '800', color: Colores.tinta }}>
                     {p.nombre}
                   </Text>
-                  <Text style={{ fontSize: 11, color: Colores.suave }}>
+                  <Text style={{ fontSize: 10, color: Colores.suave, marginTop: 3 }}>
                     {(p.categoria_nombre || p.tipo_prenda || '').toString().toUpperCase()}
                   </Text>
-                  <Text style={{ fontSize: 13, fontWeight: '900', color: Colores.acento, marginTop: 2 }}>
+                  <Text style={{ fontSize: 14, fontWeight: '900', color: Colores.acentoOscuro, marginTop: 5 }}>
                     Bs. {Number(p.precio_base || 0).toFixed(2)}
                   </Text>
                 </View>

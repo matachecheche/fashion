@@ -38,7 +38,7 @@ export const CarritoScreen: React.FC = () => {
       <FlatList
         data={carrito}
         keyExtractor={(item) => String(item.variante_id)}
-        contentContainerStyle={{ padding: 16 }}
+        contentContainerStyle={{ padding: 16, width: '100%', maxWidth: 980, alignSelf: 'center', flexGrow: 1 }}
         renderItem={({ item }) => (
           <Tarjeta style={{ flexDirection: 'row', gap: 12, marginBottom: 10 }}>
             <Image
@@ -58,17 +58,27 @@ export const CarritoScreen: React.FC = () => {
                 </Text>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                   <TouchableOpacity
+                    accessibilityRole="button"
+                    accessibilityLabel={`Reducir cantidad de ${item.nombre}`}
+                    hitSlop={6}
                     onPress={() =>
                       item.cantidad <= 1
                         ? quitarDelCarrito(item.variante_id)
                         : agregarAlCarrito({ ...item, cantidad: -1 })
                     }
+                    style={{ width: 38, height: 38, borderRadius: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: Colores.superficie }}
                   >
                     <Text style={{ fontSize: 20, fontWeight: '900', color: Colores.texto }}>−</Text>
                   </TouchableOpacity>
-                  <Text style={{ fontWeight: '800' }}>{item.cantidad}</Text>
-                  <TouchableOpacity onPress={() => agregarAlCarrito({ ...item, cantidad: 1 })}>
-                    <Text style={{ fontSize: 20, fontWeight: '900', color: Colores.texto }}>+</Text>
+                  <Text style={{ fontWeight: '900', color: Colores.tinta, minWidth: 18, textAlign: 'center' }}>{item.cantidad}</Text>
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    accessibilityLabel={`Aumentar cantidad de ${item.nombre}`}
+                    hitSlop={6}
+                    onPress={() => agregarAlCarrito({ ...item, cantidad: 1 })}
+                    style={{ width: 38, height: 38, borderRadius: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: Colores.acentoSuave }}
+                  >
+                    <Text style={{ fontSize: 20, fontWeight: '900', color: Colores.acentoOscuro }}>+</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -88,6 +98,7 @@ export const CarritoScreen: React.FC = () => {
           padding: 16,
         }}
       >
+        <View style={{ width: '100%', maxWidth: 948, alignSelf: 'center' }}>
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 }}>
           <Text style={{ fontWeight: '700', color: Colores.texto }}>Total</Text>
           <Text style={{ fontWeight: '900', fontSize: 20, color: Colores.tinta }}>
@@ -96,9 +107,10 @@ export const CarritoScreen: React.FC = () => {
         </View>
         <Boton titulo="Continuar al Checkout →" variante="acento" onPress={() => nav.push('Checkout')} />
         <View style={{ height: 6 }} />
-        <TouchableOpacity onPress={limpiarCarrito}>
-          <Text style={{ textAlign: 'center', color: Colores.suave, fontSize: 12 }}>Vaciar carrito</Text>
+        <TouchableOpacity onPress={limpiarCarrito} accessibilityRole="button" style={{ minHeight: 42, alignItems: 'center', justifyContent: 'center' }}>
+          <Text style={{ textAlign: 'center', color: Colores.suave, fontSize: 12, fontWeight: '700' }}>Vaciar carrito</Text>
         </TouchableOpacity>
+        </View>
       </View>
     </View>
   );

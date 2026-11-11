@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { ScrollView, Text, View } from 'react-native';
+import { RefreshControl, ScrollView, Text, View } from 'react-native';
 import { apiFetch } from '../api';
 import { useApp } from '../context';
 import { BadgeEstado, Boton, Colores, Encabezado, Estilos, Tarjeta } from '../ui';
@@ -38,7 +38,11 @@ export const ReservasScreen: React.FC = () => {
   const offlineReservas = cola.filter((x) => x.tipo === 'reserva');
 
   return (
-    <ScrollView style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
+    <ScrollView
+      style={Estilos.contenedor}
+      contentContainerStyle={Estilos.scroll}
+      refreshControl={<RefreshControl refreshing={cargando} onRefresh={cargar} tintColor={Colores.acento} />}
+    >
       <Encabezado
         titulo="📅 Mis Reservas"
         subtitulo="Prendas apartadas para prueba física en tienda."
@@ -70,13 +74,25 @@ export const ReservasScreen: React.FC = () => {
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
             <View>
               <Text style={{ fontWeight: '800', color: Colores.tinta }}>{r.codigo}</Text>
-              <Text style={{ fontSize: 11, color: Colores.suave }}>
+              <Text style={{ fontSize: 11, color: Colores.suave, marginTop: 4 }}>
                 {r.sucursal_nombre || `Sucursal #${r.sucursal_id}`} · cita{' '}
-                {new Date(r.fecha_cita).toLocaleString()}
+                {r.fecha_cita ? new Date(r.fecha_cita).toLocaleString() : 'Fecha no disponible'}
               </Text>
+              <Text style={{ fontSize: 11, color: Colores.suave, marginTop: 3 }}>Expira: {r.expira_en ? new Date(r.expira_en).toLocaleString() : 'No indicado'}</Text>
             </View>
             <BadgeEstado estado={r.estado} />
           </View>
+          {(r.items || []).length > 0 && (
+            <View style={{ borderTopWidth: 1, borderTopColor: Colores.borde, marginTop: 12, paddingTop: 10, gap: 6 }}>
+              <Text style={Estilos.label}>PRENDAS RESERVADAS</Text>
+              {(r.items || []).map((item: any, index: number) => (
+                <View key={`${item.id || item.variante_id || index}`} style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 8 }}>
+                  <Text style={[Estilos.texto, { flex: 1 }]}>{item.producto_nombre || 'Prenda'} · {item.sku || 'Sin SKU'} · Talla {item.talla || '—'} · {item.color || '—'} × {item.cantidad || 1}</Text>
+                  <Text style={[Estilos.texto, { fontWeight: '800' }]}>Bs. {Number(item.precio_unitario || 0).toFixed(2)}</Text>
+                </View>
+              ))}
+            </View>
+          )}
           {['pendiente', 'preparada'].includes(r.estado) && (
             <View style={{ marginTop: 10 }}>
               <Boton titulo="Cancelar reserva" variante="outline" onPress={() => cancelar(r.id)} />

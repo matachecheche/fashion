@@ -51,7 +51,7 @@ export const AuthScreen: React.FC<{ navParams?: any }> = ({ navParams }) => {
       style={{ flex: 1 }}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <ScrollView style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
+      <ScrollView style={Estilos.contenedor} contentContainerStyle={Estilos.scroll} keyboardShouldPersistTaps="handled">
         <Encabezado
           titulo={modo === 'login' ? '🔐 Iniciar Sesión' : '👤 Crear Cuenta'}
           subtitulo={`Tienda: /tienda/${tenantSlug} · Autenticación por tenant con JWT`}
@@ -124,9 +124,6 @@ export const AuthScreen: React.FC<{ navParams?: any }> = ({ navParams }) => {
               {modo === 'login' ? '¿Sin cuenta? Crear registro' : '¿Ya tienes cuenta? Iniciar sesión'}
             </Text>
           </TouchableOpacity>
-          <Text style={{ fontSize: 11, color: Colores.suave, textAlign: 'center' }}>
-            Trial admin: admin@fashionstore.bo / Fashion2026!
-          </Text>
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
