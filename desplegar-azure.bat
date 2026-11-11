@@ -72,19 +72,18 @@ if errorlevel 1 goto EXTENSION_ERROR
 goto EXT_DONE
 
 :EXT_PRESENT
-echo [OK] La extension containerapp ya esta instalada. Se intenta actualizar sin detener el flujo.
-call az extension update --name containerapp --only-show-errors >nul 2>&1
+echo [OK] La extension containerapp ya esta instalada. Se reutiliza para evitar cambios entre despliegues.
 call az extension show --name containerapp --query version --output tsv
 
 :EXT_DONE
 
 echo.
 echo Docker local no es necesario: las imagenes publicas GHCR las compila GitHub Actions.
-echo GHCR fue confirmado; el asistente pedira confirmacion antes del preflight Azure/Neon.
+echo El asistente permite reutilizar el perfil anterior o revisar la configuracion.
 echo Antes de desplegar, publica los tres paquetes y comprueba que sean Public; no se crea ACR.
-echo Las claves Neon y Stripe se solicitaran ocultas y no se guardaran en el repo.
+echo La configuracion se guarda en builds\deploy-profile.json para reutilizarla en futuras ejecuciones.
+echo Las credenciales se guardan cifradas con Windows DPAPI y no se suben al repo.
 echo.
-start "" "%~dp0docs\DESPLIEGUE-AZURE.md"
 %PYTHON% tools\deploy_azure.py
 set "DEPLOY_RC=%ERRORLEVEL%"
 if not "%DEPLOY_RC%"=="0" (

@@ -279,8 +279,10 @@ class ExpressEnvironmentReuseTests(unittest.TestCase):
                 if self.first:
                     self.first = False
                     raise deploy.DeployError("MaxNumberOfRegionalExpressEnvironmentsInSubExceeded")
-            def run(self, args, quiet=False):
-                return "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/managedEnvironments/env-new"
+            def az_json(self, args):
+                if args[0:3] == ["containerapp", "env", "show"]:
+                    return {"id": "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/managedEnvironments/env-new"}
+                raise AssertionError(args)
 
         runner = FakeRunner()
         state = {"resource_group": "rg", "status": "in_progress"}
@@ -848,27 +850,85 @@ class LocalSafetyRegressionTests(unittest.TestCase):
         self.assertNotIn(secret, str(error.exception))
         self.assertIn("[REDACTED]", str(error.exception))
 
-    def test_windows_runner_passes_azure_args_without_cmd_quoting(self) -> None:
+    def test_windows_runner_uses_cmd_without_powerShell_clixml_and_preserves_arguments(self) -> None:
         runner = deploy.Runner()
-        powershell = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        az_cmd = r"C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
+        comspec = r"C:\Windows\System32\cmd.exe"
         expected_args = [
             "containerapp", "env", "create", "--location", "East US",
             "--body", r"@C:\Users\Test User\AppData\Local\Temp\payload.json",
         ]
-        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="OK")
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="OK", stderr="WARNING: harmless extension notice")
 
         def which(name):
-            return powershell if name == "powershell.exe" else None
+            if name == "az":
+                return az_cmd
+            if name == "cmd.exe":
+                return comspec
+            return None
 
-        with patch.object(deploy.os, "name", "nt"), patch.object(deploy.shutil, "which", side_effect=which), patch.object(deploy.subprocess, "run", return_value=completed) as run:
+        with patch.object(deploy.os, "name", "nt"), patch.object(deploy.shutil, "which", side_effect=which), patch.object(
+            deploy.subprocess, "run", return_value=completed
+        ) as run:
             self.assertEqual(runner.run(["az", *expected_args], quiet=True), "OK")
 
         command = run.call_args.args[0]
-        self.assertEqual(command[0], powershell)
-        self.assertIn("-EncodedCommand", command)
-        script = base64.b64decode(command[-1]).decode("utf-16le")
-        self.assertIn("& az @azArgs", script)
-        self.assertEqual(json.loads(run.call_args.kwargs["env"]["FASHIONSTORE_AZ_ARGS_JSON"]), expected_args)
+        self.assertEqual(command[:3], [comspec, "/d", "/s"])
+        self.assertEqual(command[3], "/c")
+        self.assertIn('az.cmd', command[4])
+        self.assertIn('"East US"', command[4])
+        self.assertIn('"@C:\\Users\\Test User\\AppData\\Local\\Temp\\payload.json"', command[4])
+        self.assertNotIn("powershell", " ".join(command).lower())
+        self.assertNotIn("FASHIONSTORE_AZ_ARGS_JSON", run.call_args.kwargs["env"])
+
+    def test_runner_keeps_successful_azure_stderr_out_of_structured_stdout(self) -> None:
+        runner = deploy.Runner()
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0,
+            stdout='{"id":"/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/managedEnvironments/env"}',
+            stderr="WARNING: extension preview notice",
+        )
+        with patch.object(deploy.subprocess, "run", return_value=completed):
+            output = runner.run(["az", "containerapp", "env", "show"], quiet=True)
+        self.assertTrue(output.startswith('{"id":'))
+        self.assertNotIn("WARNING", output)
+
+    def test_managed_environment_id_rejects_clixml_and_wrong_subscription(self) -> None:
+        valid = "/subscriptions/sub-123/resourceGroups/rg/providers/Microsoft.App/managedEnvironments/env"
+        self.assertEqual(deploy._validate_managed_environment_id(valid, "sub-123"), valid)
+        with self.assertRaisesRegex(deploy.DeployError, "ID de Container Apps Environment inválido"):
+            deploy._validate_managed_environment_id("<Objs Version=\"1.1.0.1\">CLIXML</Objs>", "sub-123")
+        with self.assertRaisesRegex(deploy.DeployError, "otra suscripción"):
+            deploy._validate_managed_environment_id(valid, "another-sub")
+
+    def test_wait_containerapp_uses_json_provisioning_state_not_tsv_stderr(self) -> None:
+        class JsonRunner:
+            def __init__(self):
+                self.calls = 0
+            def az_json(self, args):
+                self.calls += 1
+                return {"properties": {"provisioningState": "Succeeded"}}
+        runner = JsonRunner()
+        with patch.object(deploy.time, "sleep") as sleep:
+            deploy._wait_containerapp(runner, "fashionstore-ai-test", "rg-test", attempts=1)
+        self.assertEqual(runner.calls, 1)
+        sleep.assert_not_called()
+
+    def test_wait_containerapp_stops_with_actionable_failed_state(self) -> None:
+        class JsonRunner:
+            def az_json(self, args):
+                return {"properties": {"provisioningState": "Failed", "deploymentErrors": "ImagePullFailed"}}
+        with self.assertRaisesRegex(deploy.DeployError, "ImagePullFailed"):
+            deploy._wait_containerapp(JsonRunner(), "fashionstore-ai-test", "rg-test", attempts=1)
+
+    def test_wait_containerapp_reports_repeated_query_errors_without_clixml_state(self) -> None:
+        class BrokenRunner:
+            def az_json(self, args):
+                raise deploy.DeployError("Falló az (código 1). Salida saneada: WARNING: extension notice")
+        with patch.object(deploy.time, "sleep"):
+            with self.assertRaisesRegex(deploy.DeployError, "No se pudo consultar de forma fiable") as error:
+                deploy._wait_containerapp(BrokenRunner(), "fashionstore-ai-test", "rg-test", attempts=8)
+        self.assertNotIn("<Objs", str(error.exception))
 
     def test_sql_driver_prefers_psql_and_falls_back_to_installed_node_pg(self) -> None:
         with patch.object(deploy.shutil, "which", side_effect=lambda name: "psql.exe" if name == "psql" else None), patch.object(deploy, "_node_pg_available", return_value=True):
@@ -933,7 +993,7 @@ class LocalSafetyRegressionTests(unittest.TestCase):
         main_source = source[source.index("def main() -> int:"):]
         self.assertLess(
             main_source.index('_prompt_yes_no("¿Confirmas usar GHCR'),
-            main_source.index("_subscription(runner,"),
+            main_source.index("_subscription("),
         )
         self.assertIn("GHCR no confirmado", main_source)
 
@@ -1040,6 +1100,104 @@ class TsvNoiseTests(unittest.TestCase):
         self.assertEqual(deploy._tsv_value(noisy), "fashionstore-api-abc.chilecentral.azurecontainerapps.io")
         self.assertEqual(deploy._tsv_value("WARNING: x\nSucceeded"), "Succeeded")
         self.assertEqual(deploy._tsv_value("The installed extension 'containerapp' is in preview."), "")
+
+
+class SavedDeploymentProfileTests(unittest.TestCase):
+    def test_profile_persists_editable_settings_and_encrypts_secrets_in_same_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile_path = Path(directory) / "deploy-profile.json"
+            with patch.object(deploy, "DEPLOY_PROFILE", profile_path), patch.object(
+                deploy, "_supports_dpapi", return_value=True
+            ), patch.object(deploy, "_dpapi_protect", return_value="SYNTHETIC_CIPHERTEXT"):
+                deploy._save_deploy_profile(
+                    {"settings": {"subscription_id": "sub-id", "location": "chilecentral", "ghcr_owner": "matachecheche"}},
+                    {"neon_url": "postgresql://synthetic-secret", "llm_credentials": {"gemini": "AQ.synthetic-secret"}},
+                )
+            saved = json.loads(profile_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["settings"]["subscription_id"], "sub-id")
+            self.assertEqual(saved["secret_protection"], "Windows DPAPI / CurrentUser")
+            self.assertEqual(saved["secrets_protected"], "SYNTHETIC_CIPHERTEXT")
+            raw = profile_path.read_text(encoding="utf-8")
+            self.assertNotIn("postgresql://synthetic-secret", raw)
+            self.assertNotIn("AQ.synthetic-secret", raw)
+
+    def test_profile_load_decrypts_saved_secret_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile_path = Path(directory) / "deploy-profile.json"
+            profile_path.write_text(json.dumps({
+                "settings": {"location": "chilecentral"},
+                "secrets_protected": "SYNTHETIC_CIPHERTEXT",
+            }), encoding="utf-8")
+            payload = json.dumps({"neon_url": "postgresql://synthetic", "llm_credentials": {}}).encode()
+            with patch.object(deploy, "DEPLOY_PROFILE", profile_path), patch.object(
+                deploy, "_dpapi_unprotect", return_value=payload
+            ):
+                profile, secrets_data = deploy._load_deploy_profile()
+            self.assertEqual(profile["settings"]["location"], "chilecentral")
+            self.assertEqual(secrets_data["neon_url"], "postgresql://synthetic")
+
+    def test_fast_profile_menu_is_default_and_does_not_need_manual_reentry(self):
+        profile = {"settings": {"subscription_id": "sub", "location": "chilecentral", "ghcr_owner": "matachecheche"}}
+        with patch("builtins.input", return_value=""):
+            self.assertEqual(deploy._select_profile_mode(profile), "quick")
+
+    def test_fast_mode_reuses_saved_llm_keys_without_prompting(self):
+        groq = "gsk_" + "g" * 35
+        gemini = "AQ.Ab8RN6KzvT-" + "m" * 35
+        with patch("builtins.input") as input_mock, patch.object(deploy.getpass, "getpass") as getpass_mock:
+            credentials = deploy._read_optional_llm_credentials(
+                {"groq": groq, "gemini": gemini}, auto_use_saved=True
+            )
+        self.assertEqual(credentials, {"groq": groq, "gemini": gemini})
+        input_mock.assert_not_called()
+        getpass_mock.assert_not_called()
+
+    def test_fast_mode_keeps_previously_omitted_llm_providers_omitted(self):
+        with patch("builtins.input") as input_mock, patch.object(deploy.getpass, "getpass") as getpass_mock:
+            credentials = deploy._read_optional_llm_credentials({}, auto_use_saved=True)
+        self.assertEqual(credentials, {})
+        input_mock.assert_not_called()
+        getpass_mock.assert_not_called()
+
+    def test_profile_selected_llm_provider_is_preselected_when_secret_needs_entering(self):
+        gemini = "AQ.Ab8RN6KzvT-" + "p" * 35
+        with patch("builtins.input", return_value=""), patch.object(deploy.getpass, "getpass", return_value=gemini):
+            credentials = deploy._read_optional_llm_credentials(
+                {}, auto_use_saved=True, preferred_providers=["gemini"]
+            )
+        self.assertEqual(credentials, {"gemini": gemini})
+
+    def test_fast_mode_selects_saved_express_environment(self):
+        saved = {
+            "id": "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/managedEnvironments/env-saved",
+            "name": "env-saved", "resource_group": "rg", "location": "chilecentral", "provisioning_state": "succeeded",
+        }
+        with patch.object(deploy, "_list_express_environments", return_value=[saved]):
+            location, selected = deploy._choose_express_environment(
+                object(), "sub", "chilecentral", ["chilecentral"],
+                preferred_environment_id=saved["id"], auto_select=True,
+            )
+        self.assertEqual(location, "chilecentral")
+        self.assertEqual(selected["name"], "env-saved")
+
+    def test_subscription_auto_selects_saved_id_without_prompting(self):
+        class ProfileRunner:
+            def __init__(self):
+                self.active = ""
+            def az_json(self, args):
+                if args == ["account", "list"]:
+                    return [{"id": "sub-saved", "name": "Azure Students", "state": "Enabled"}]
+                if args == ["account", "show"]:
+                    return {"id": self.active}
+                raise AssertionError(args)
+            def az_quiet(self, args):
+                self.active = args[args.index("--subscription") + 1]
+        runner = ProfileRunner()
+        with patch("builtins.input") as input_mock:
+            result = deploy._subscription(runner, "sub-saved", auto_select=True)
+        self.assertEqual(result, ("sub-saved", "Azure Students"))
+        input_mock.assert_not_called()
+
 
 
 if __name__ == "__main__":

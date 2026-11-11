@@ -8,9 +8,11 @@ puede generar cargos de consumo y egress.
 """
 from __future__ import annotations
 
-import base64
 import getpass
 import json
+import base64
+import ctypes
+from ctypes import wintypes
 import hashlib
 from datetime import datetime, timezone
 import os
@@ -34,6 +36,7 @@ CLOUD_SQL_SCRIPT = ROOT / "tools" / "cloud_sql.js"
 NEST_DIR = ROOT / "backend-nest"
 BUILD_STATE = ROOT / "builds" / "azure-test-deployment.json"
 BUILD_HISTORY = ROOT / "builds" / "azure-test-deployments.json"
+DEPLOY_PROFILE = ROOT / "builds" / "deploy-profile.json"
 SEED_USERS = (
     "admin@fashionstore.bo",
     "encargado@fashionstore.bo",
@@ -192,13 +195,37 @@ def _json_from_cli_output(output: str) -> object:
 
 
 class Runner:
-    """Run local tools quietly, redact child-process output, and avoid shell interpolation."""
+    """Run tools with stdout/stderr separated and redact credentials from errors.
+
+    On Windows, Azure CLI is normally installed as ``az.cmd``. It must be
+    launched through cmd.exe, not PowerShell: PowerShell can serialize native
+    stderr as CLIXML ErrorRecords, which previously contaminated JSON/TSV
+    responses and even became the value of Container Apps ``environmentId``.
+    """
 
     def __init__(self) -> None:
         self.sensitive: list[str] = []
 
     def add_sensitive(self, *values: str) -> None:
         self.sensitive.extend(str(value) for value in values if value)
+
+    @staticmethod
+    def _windows_az_command(args: Sequence[str], env: dict[str, str]) -> list[str]:
+        az_executable = shutil.which("az")
+        if not az_executable:
+            raise DeployError("No se encontró Azure CLI (az) en PATH.")
+
+        suffix = os.path.splitext(az_executable)[1].lower()
+        if suffix not in {".cmd", ".bat"}:
+            return [az_executable, *[str(value) for value in args]]
+
+        comspec = env.get("COMSPEC") or shutil.which("cmd.exe") or "cmd.exe"
+        # list2cmdline applies Windows argument quoting. The additional outer
+        # quotes are required by cmd.exe /s /c when the executable path contains
+        # spaces. No argument is inserted into PowerShell source or a script.
+        command_line = subprocess.list2cmdline([az_executable, *[str(value) for value in args]])
+        command_line = f'"{command_line}"'
+        return [comspec, "/d", "/s", "/c", command_line]
 
     def run(
         self,
@@ -213,19 +240,8 @@ class Runner:
         if extra_env:
             env.update(extra_env)
 
-        if os.name == "nt" and cmd and cmd[0] == "az":
-            # Azure CLI on Windows is commonly installed as az.cmd. Pass arguments as
-            # a JSON environment value to PowerShell, never interpolate them as script.
-            powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
-            if not powershell:
-                raise DeployError("No se encontró PowerShell para invocar Azure CLI en Windows.")
-            env["FASHIONSTORE_AZ_ARGS_JSON"] = json.dumps(cmd[1:], ensure_ascii=False)
-            script = (
-                "$azArgs = @(ConvertFrom-Json -InputObject $env:FASHIONSTORE_AZ_ARGS_JSON); "
-                "& az @azArgs 2>&1; exit $LASTEXITCODE"
-            )
-            encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-            actual = [powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]
+        if os.name == "nt" and cmd and cmd[0].lower() == "az":
+            actual = self._windows_az_command(cmd[1:], env)
         else:
             actual = cmd
 
@@ -235,30 +251,48 @@ class Runner:
                 cwd=str(cwd or ROOT),
                 env=env,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.PIPE,
                 check=False,
             )
         except OSError as exc:
             raise DeployError(f"No se pudo ejecutar {cmd[0]}: {exc}") from exc
 
-        output = _redact(completed.stdout, self.sensitive).strip()
+        output = _redact(completed.stdout or "", self.sensitive).strip()
+        error_output = _redact(completed.stderr or "", self.sensitive).strip()
         if completed.returncode != 0:
-            detail = output[-5000:] if output else "sin detalle del proceso"
+            parts = [part for part in (output, error_output) if part]
+            detail = "\n".join(parts)[-7000:] if parts else "sin detalle del proceso"
             raise DeployError(f"Falló {cmd[0]} (código {completed.returncode}). Salida saneada:\n{detail}")
-        if not quiet and output:
-            print(output)
+
+        if not quiet:
+            if output:
+                print(output)
+            if error_output:
+                # Azure CLI and its extension may emit non-fatal warnings to stderr.
+                print(error_output, file=sys.stderr)
+        # Structured data consumers receive stdout only. Warning text stays separate.
         return output
 
     def az_json(self, args: Sequence[str]) -> object:
-        output = self.run(["az", *args, "--output", "json"], quiet=True)
+        normalized = list(args)
+        if "--only-show-errors" not in normalized:
+            normalized.append("--only-show-errors")
+        if "--output" not in normalized:
+            normalized.extend(["--output", "json"])
+        output = self.run(["az", *normalized], quiet=True)
         return _json_from_cli_output(output)
 
     def az_quiet(self, args: Sequence[str]) -> None:
-        # Azure CLI emits preview/Breaking Change warnings to stderr even when a
-        # command succeeds. Suppress those notices so PowerShell does not wrap them
-        # as CLIXML ErrorRecords on Windows; real errors remain visible.
-        self.run(["az", *args, "--only-show-errors", "--output", "none"], quiet=True)
+        # Suppress informational warnings; Runner still keeps stdout/stderr separate.
+        normalized = list(args)
+        if "--only-show-errors" not in normalized:
+            normalized.append("--only-show-errors")
+        if "--output" not in normalized:
+            normalized.extend(["--output", "none"])
+        self.run(["az", *normalized], quiet=True)
 
 
 def _psql_env(connection: NeonConnection) -> dict[str, str]:
@@ -451,8 +485,13 @@ def _prompt_exact_confirmation(prompt: str, expected: str, *, purpose: str) -> b
         print(f"El texto no coincide. Vuelve a escribir {expected} para {purpose}, o escribe CANCELAR para salir.")
 
 
-def _prompt_neon_connection() -> NeonConnection:
+def _prompt_neon_connection(saved_url: str | None = None, *, prefer_saved: bool = False) -> NeonConnection:
     """Ask again when the user pastes a malformed Neon URL; never echo the URL."""
+    if saved_url and prefer_saved and _prompt_yes_no("¿Reutilizar la conexión Neon guardada? (S/n): ", default=True):
+        try:
+            return parse_neon_connection_url(saved_url)
+        except DeployError:
+            print("[AVISO] La URL guardada no es válida; introduce una conexión nueva.")
     while True:
         raw = getpass.getpass("Pega la URL directa owner de Neon (entrada oculta; Enter para cancelar): ").strip()
         if not raw:
@@ -488,10 +527,26 @@ def _is_retryable_neon_connection_error(error: Exception) -> bool:
     return any(marker in message for marker in markers)
 
 
-def _prompt_and_preflight_neon(runner: Runner) -> tuple[NeonConnection, str]:
-    """Let the user re-enter Neon credentials if the connection preflight fails."""
+def _prompt_and_preflight_neon(
+    runner: Runner, saved_url: str | None = None, *, auto_use_saved: bool = False
+) -> tuple[NeonConnection, str]:
+    """Reuse a protected Neon URL or prompt again if it is missing/invalid."""
+    if saved_url and auto_use_saved:
+        try:
+            owner = parse_neon_connection_url(saved_url)
+        except DeployError:
+            owner = None
+            print("[AVISO] La URL Neon guardada no tiene un formato válido. Se solicitará una nueva.")
+        if owner is not None:
+            runner.add_sensitive(owner.original_url, owner.password)
+            try:
+                return owner, preflight_neon(runner, owner)
+            except DeployError as exc:
+                if not _is_retryable_neon_connection_error(exc):
+                    raise
+                print("[AVISO] La conexión Neon guardada ya no funciona. Se solicitará una nueva URL.")
     while True:
-        owner = _prompt_neon_connection()
+        owner = _prompt_neon_connection(saved_url, prefer_saved=bool(saved_url and not auto_use_saved))
         runner.add_sensitive(owner.original_url, owner.password)
         try:
             return owner, preflight_neon(runner, owner)
@@ -670,20 +725,40 @@ def _is_stripe_test_api_key(key: str) -> bool:
     return key.startswith(("rk_test_", "sk_test_")) and len(key) >= 16 and not re.search(r"REPLACE|CHANGE_ME", key, re.I)
 
 
-def _read_optional_llm_credentials() -> dict[str, str]:
-    """Collect optional LLM keys and identify keys pasted into the wrong provider prompt."""
+def _read_optional_llm_credentials(
+    saved_credentials: dict[str, str] | None = None, *, auto_use_saved: bool = False,
+    preferred_providers: Iterable[str] | None = None,
+) -> dict[str, str]:
+    """Collect/reuse optional LLM keys and identify keys pasted into the wrong provider prompt."""
     print("\nIA generativa opcional. Puedes configurar Groq, Gemini, ambos o ninguno.")
     print("  Groq:   gsk_... (solo claves Groq).")
     print("  Gemini: AIza... o AQ.Ab8RN6KzvT-... (claves de Google Gemini).")
     print("  Stripe: rk_test_... o sk_test_... (se solicitará por separado después del despliegue).")
     print("Las claves IA se guardan como secretos de Azure Container Apps, no en el ZIP ni en el archivo de estado.")
     credentials: dict[str, str] = {}
+    saved_credentials = saved_credentials or {}
+    preferred = {str(value).casefold() for value in (preferred_providers or [])}
     for provider in ("groq", "gemini"):
+        saved_key = str(saved_credentials.get(provider) or "")
+        saved_valid = _is_groq_api_key(saved_key) if provider == "groq" else _is_gemini_api_key(saved_key)
+        if saved_valid and auto_use_saved:
+            credentials[provider] = saved_key
+            print(f"[OK] Se reutiliza la clave {provider.capitalize()} guardada (cifrada).")
+            continue
+        if auto_use_saved and provider not in preferred:
+            print(f"[OK] {provider.capitalize()} quedó omitido en el perfil anterior; no se volverá a preguntar.")
+            continue
+        if saved_valid and _prompt_yes_no(f"¿Mantener la clave {provider.capitalize()} guardada? (S/n): ", default=True):
+            credentials[provider] = saved_key
+            continue
         # If a Gemini key was recognized in the previous prompt, do not ask for it twice.
         if provider in credentials:
             print("[OK] Se detectó y reservó una clave Gemini; no se volverá a solicitar.")
             continue
-        if not _prompt_yes_no(f"¿Configurar {provider.capitalize()} ahora? (s/N): ", default=False):
+        should_configure_by_profile = provider in preferred
+        if not _prompt_yes_no(
+            f"¿Configurar {provider.capitalize()} ahora? (s/N): ", default=should_configure_by_profile
+        ):
             continue
         while True:
             key = getpass.getpass(f"Clave API {provider} (entrada oculta; Enter para omitir): ").strip()
@@ -872,6 +947,187 @@ def _load_state() -> dict:
         return value if isinstance(value, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _supports_dpapi() -> bool:
+    return os.name == "nt"
+
+
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+
+def _dpapi_protect(raw: bytes) -> str:
+    """Encrypt profile secrets with Windows DPAPI for the current Windows user."""
+    if not _supports_dpapi():
+        raise DeployError("El guardado cifrado de credenciales requiere Windows DPAPI.")
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    source_buffer = ctypes.create_string_buffer(raw)
+    source = _DATA_BLOB(len(raw), ctypes.cast(source_buffer, ctypes.POINTER(ctypes.c_byte)))
+    output = _DATA_BLOB()
+    crypt32.CryptProtectData.argtypes = [
+        ctypes.POINTER(_DATA_BLOB), wintypes.LPCWSTR, ctypes.POINTER(_DATA_BLOB),
+        ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(_DATA_BLOB),
+    ]
+    crypt32.CryptProtectData.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    if not crypt32.CryptProtectData(ctypes.byref(source), "FashionStore deployment profile", None, None, None, 0x1, ctypes.byref(output)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        encrypted = ctypes.string_at(output.pbData, output.cbData)
+        return base64.b64encode(encrypted).decode("ascii")
+    finally:
+        kernel32.LocalFree(output.pbData)
+
+
+def _dpapi_unprotect(encoded: str) -> bytes:
+    """Decrypt profile secrets; only the same Windows user on this device can do so."""
+    if not _supports_dpapi():
+        raise DeployError("El descifrado DPAPI solo está disponible en Windows.")
+    encrypted = base64.b64decode(encoded, validate=True)
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    source_buffer = ctypes.create_string_buffer(encrypted)
+    source = _DATA_BLOB(len(encrypted), ctypes.cast(source_buffer, ctypes.POINTER(ctypes.c_byte)))
+    output = _DATA_BLOB()
+    description = wintypes.LPWSTR()
+    crypt32.CryptUnprotectData.argtypes = [
+        ctypes.POINTER(_DATA_BLOB), ctypes.POINTER(wintypes.LPWSTR), ctypes.POINTER(_DATA_BLOB),
+        ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(_DATA_BLOB),
+    ]
+    crypt32.CryptUnprotectData.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    if not crypt32.CryptUnprotectData(ctypes.byref(source), ctypes.byref(description), None, None, None, 0x1, ctypes.byref(output)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return ctypes.string_at(output.pbData, output.cbData)
+    finally:
+        kernel32.LocalFree(output.pbData)
+        if description:
+            kernel32.LocalFree(ctypes.cast(description, ctypes.c_void_p))
+
+
+def _load_deploy_profile() -> tuple[dict, dict]:
+    """Load editable settings and decrypt any saved credentials, if available."""
+    try:
+        profile = json.loads(DEPLOY_PROFILE.read_text(encoding="utf-8"))
+        if not isinstance(profile, dict):
+            return {}, {}
+    except (OSError, json.JSONDecodeError):
+        return {}, {}
+    secrets_data: dict = {}
+    encrypted = profile.get("secrets_protected")
+    if encrypted:
+        try:
+            decoded = json.loads(_dpapi_unprotect(str(encrypted)).decode("utf-8"))
+            if isinstance(decoded, dict):
+                secrets_data = decoded
+                secrets_data["__profile_secrets_loaded__"] = True
+        except Exception:
+            print("[AVISO] No se pudieron descifrar las credenciales guardadas. Se solicitarán nuevamente.")
+            secrets_data["__decrypt_failed__"] = True
+    return profile, secrets_data
+
+
+def _save_deploy_profile(profile: dict, secrets_data: dict | None = None) -> None:
+    """Persist one human-editable JSON profile; credentials are DPAPI-encrypted on Windows."""
+    DEPLOY_PROFILE.parent.mkdir(parents=True, exist_ok=True)
+    output = {
+        "version": 1,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "instructions": "Edita settings para cambiar valores no secretos. Las credenciales se guardan cifradas con DPAPI del usuario Windows actual; usa el asistente para cambiarlas.",
+        "settings": dict(profile.get("settings") or {}),
+    }
+    secret_values = dict(secrets_data or {})
+    if secret_values and _supports_dpapi():
+        output["secret_protection"] = "Windows DPAPI / CurrentUser"
+        output["secrets_protected"] = _dpapi_protect(json.dumps(secret_values, ensure_ascii=False).encode("utf-8"))
+    elif profile.get("secrets_protected"):
+        # Preserve ciphertext if the profile is edited on a non-Windows machine.
+        output["secret_protection"] = profile.get("secret_protection", "Windows DPAPI / CurrentUser")
+        output["secrets_protected"] = profile["secrets_protected"]
+    elif _supports_dpapi():
+        output["secret_protection"] = "Windows DPAPI / CurrentUser (sin credenciales guardadas todavía)"
+        output["secrets_protected"] = ""
+    else:
+        output["secret_protection"] = "No disponible en este sistema; el asistente volverá a solicitar credenciales."
+        output["secrets_protected"] = ""
+    temporary = _make_private_temp_json(output)
+    try:
+        temporary.replace(DEPLOY_PROFILE)
+        try:
+            os.chmod(DEPLOY_PROFILE, 0o600)
+        except OSError:
+            pass
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _select_profile_mode(profile: dict) -> str:
+    """Offer a fast repeat deployment, full review, or opening the editable profile."""
+    settings = profile.get("settings") if isinstance(profile.get("settings"), dict) else {}
+    configured = bool(settings.get("subscription_id") and settings.get("location") and settings.get("ghcr_owner"))
+    print("\nPERFIL DE DESPLIEGUE")
+    print(f"Archivo: {DEPLOY_PROFILE.relative_to(ROOT)}")
+    if configured:
+        print("  1) USAR CONFIGURACIÓN ANTERIOR (rápido; reutiliza datos guardados)")
+        print("  2) REVISAR/CAMBIAR OPCIONES antes de desplegar")
+        print("  3) ABRIR EL ARCHIVO de configuración para editar opciones")
+        print("  4) CANCELAR")
+        while True:
+            choice = input("Elige [1-4] [1]: ").strip() or "1"
+            if choice == "1":
+                return "quick"
+            if choice == "2":
+                return "review"
+            if choice == "3":
+                return "edit"
+            if choice == "4" or choice.casefold() in CANCEL_VALUES:
+                return "cancel"
+            print("Opción inválida. Vuelve a elegir 1, 2, 3 o 4.")
+    print("  1) CONFIGURAR DESPLIEGUE (se guardará para la próxima vez)")
+    print("  2) ABRIR/CREAR ARCHIVO DE CONFIGURACIÓN")
+    print("  3) CANCELAR")
+    while True:
+        choice = input("Elige [1-3] [1]: ").strip() or "1"
+        if choice == "1":
+            return "review"
+        if choice == "2":
+            return "edit"
+        if choice == "3" or choice.casefold() in CANCEL_VALUES:
+            return "cancel"
+        print("Opción inválida. Vuelve a elegir 1, 2 o 3.")
+
+
+def _open_deploy_profile() -> None:
+    """Create a starter profile if needed and open it in the system's default editor."""
+    if not DEPLOY_PROFILE.exists():
+        _save_deploy_profile({"settings": {
+            "ghcr_public": True,
+            "subscription_id": "",
+            "subscription_name": "",
+            "location": "chilecentral",
+            "ghcr_owner": "matachecheche",
+            "environment_id": "",
+            "environment_name": "",
+            "environment_resource_group": "",
+            "neon_strategy": "reuse",
+            "llm_providers": [],
+            "stripe_setup_choice": "ask",
+        }}, {})
+    print(f"\nArchivo de configuración: {DEPLOY_PROFILE}")
+    try:
+        if _supports_dpapi():
+            os.startfile(str(DEPLOY_PROFILE))  # type: ignore[attr-defined]
+        else:
+            webbrowser.open(DEPLOY_PROFILE.resolve().as_uri())
+        print("Se abrió el archivo. Guarda los cambios y vuelve a ejecutar desplegar-azure.bat.")
+    except Exception as exc:
+        print(f"No se pudo abrir automáticamente: {exc}")
+        print("Abre manualmente el archivo indicado con Bloc de notas o tu editor JSON.")
 
 
 def _record_state_history(state: dict) -> None:
@@ -1096,7 +1352,7 @@ def prepare_neon_database(
     return runtime_url, runtime_password, report
 
 
-def _subscription(runner: Runner, preferred_id: str | None = None) -> tuple[str, str]:
+def _subscription(runner: Runner, preferred_id: str | None = None, *, auto_select: bool = False) -> tuple[str, str]:
     accounts = runner.az_json(["account", "list"])
     if not isinstance(accounts, list):
         raise DeployError("Azure CLI no devolvió la lista de suscripciones esperada.")
@@ -1106,6 +1362,15 @@ def _subscription(runner: Runner, preferred_id: str | None = None) -> tuple[str,
 
     print("\nSuscripciones Azure disponibles:")
     preferred_index = next((i for i, a in enumerate(enabled, 1) if str(a.get("id", "")) == str(preferred_id or "")), None)
+    if auto_select and preferred_index is not None:
+        selected = enabled[preferred_index - 1]
+        subscription_id = str(selected.get("id", ""))
+        runner.az_quiet(["account", "set", "--subscription", subscription_id])
+        active = runner.az_json(["account", "show"])
+        if str(active.get("id", "")) != subscription_id:
+            raise DeployError("Azure no activó la suscripción guardada en el perfil.")
+        print(f"[OK] Se reutiliza la suscripción guardada: {selected.get('name')}.")
+        return subscription_id, str(selected.get("name", "Azure subscription"))
     for index, account in enumerate(enabled, 1):
         marker = " (última utilizada)" if index == preferred_index else ""
         print(f"  {index}) {account.get('name', '(sin nombre)')} [{account.get('id', '')}]{marker}")
@@ -1318,6 +1583,25 @@ def _validate_location(runner: Runner, location: str) -> None:
         )
 
 
+def _validate_managed_environment_id(value: object, subscription_id: str | None = None) -> str:
+    """Reject malformed/CLIXML identifiers before putting an ID into ARM payloads."""
+    resource_id = str(value or "").strip().strip('"')
+    pattern = re.compile(
+        r"^/subscriptions/([A-Za-z0-9-]{1,64})/resourceGroups/([^/]+)/providers/"
+        r"Microsoft\.App/managedEnvironments/([^/]+)$",
+        re.IGNORECASE,
+    )
+    match = pattern.fullmatch(resource_id)
+    if not match:
+        raise DeployError(
+            "Azure devolvió un ID de Container Apps Environment inválido. "
+            "Se descartó la respuesta para evitar enviar texto de PowerShell/CLIXML a Azure Resource Manager."
+        )
+    if subscription_id and match.group(1).casefold() != str(subscription_id).casefold():
+        raise DeployError("El entorno Express pertenece a otra suscripción; selecciona uno de la suscripción activa.")
+    return resource_id
+
+
 def _list_express_environments(runner: Runner, subscription_id: str, location: str) -> list[dict[str, str]]:
     """Find reusable Express environments in this subscription and region.
 
@@ -1351,6 +1635,11 @@ def _list_express_environments(runner: Runner, subscription_id: str, location: s
         resource_id = str(item.get("id") or "")
         name = str(item.get("name") or "")
         if not resource_id or not name:
+            continue
+        try:
+            resource_id = _validate_managed_environment_id(resource_id, subscription_id)
+        except DeployError:
+            # Ignore malformed list rows. Never pass an untrusted identifier to ARM.
             continue
 
         # Older CLI extensions may return only a partial list object. Confirm
@@ -1392,11 +1681,21 @@ def _choose_express_environment(
     subscription_id: str,
     location: str,
     allowed_regions: list[str],
+    *,
+    preferred_environment_id: str | None = None,
+    auto_select: bool = False,
 ) -> tuple[str, dict[str, str] | None]:
     """Reuse a regional Express environment or let the user choose another region."""
     while True:
         existing = _list_express_environments(runner, subscription_id, location)
         if existing:
+            preferred = next((item for item in existing if item.get("id") == preferred_environment_id), None)
+            if auto_select and preferred:
+                print(f"[OK] Se reutiliza el entorno Express guardado: {preferred['name']} ({preferred.get('resource_group') or 'RG existente'}).")
+                return location, preferred
+            if auto_select and len(existing) == 1:
+                print(f"[OK] Se reutiliza el único entorno Express disponible: {existing[0]['name']}.")
+                return location, existing[0]
             print(f"\nSe detectaron {len(existing)} entorno(s) Express en {location}.")
             print("Crear otro puede superar el límite regional de tu suscripción. Puedes reutilizar uno sin modificarlo.")
             for index, environment in enumerate(existing, 1):
@@ -1441,11 +1740,12 @@ def _create_or_reuse_express_environment(
 ) -> tuple[str, str, str]:
     """Create Express or recover interactively from a regional quota error."""
     if existing_environment:
+        environment_id = _validate_managed_environment_id(existing_environment.get("id"), subscription_id)
         print(
             f"Reutilizando el entorno Express existente {existing_environment['name']} "
             f"(RG: {existing_environment.get('resource_group') or 'no identificado'}). No se modificará ni eliminará."
         )
-        return existing_environment["id"], location, existing_environment["name"]
+        return environment_id, location, existing_environment["name"]
 
     current_location = location
     while True:
@@ -1458,16 +1758,16 @@ def _create_or_reuse_express_environment(
                 "--environment-mode", "express",
                 "--logs-destination", "none",
             ])
-            environment_id = runner.run([
-                "az", "containerapp", "env", "show",
+            environment = runner.az_json([
+                "containerapp", "env", "show",
                 "--name", environment_name,
                 "--resource-group", resource_group,
                 "--subscription", subscription_id,
-                "--query", "id", "--only-show-errors", "--output", "tsv",
-            ], quiet=True)
-            environment_id = _tsv_value(environment_id)
-            if not environment_id:
-                raise DeployError("Azure no devolvió el ID del Container Apps Environment recién creado.")
+            ])
+            environment_id = _validate_managed_environment_id(
+                environment.get("id") if isinstance(environment, dict) else None,
+                subscription_id,
+            )
             return environment_id, current_location, environment_name
         except DeployError as exc:
             error_text = str(exc)
@@ -1616,57 +1916,69 @@ def _tsv_value(output: str) -> str:
 
 
 def _wait_containerapp(runner: Runner, name: str, resource_group: str, *, attempts: int = 60) -> None:
+    """Poll the structured ARM object, never parse warning/CLIXML text as a state."""
     last_state = ""
+    last_error = ""
+    consecutive_errors = 0
     for _ in range(attempts):
+        properties: dict[str, object] = {}
         try:
-            last_state = runner.run(
-                [
-                    "az",
-                    "containerapp",
-                    "show",
-                    "--name",
-                    name,
-                    "--resource-group",
-                    resource_group,
-                    "--query",
-                    "properties.provisioningState",
-                    "--output",
-                    "tsv",
-                ],
-                quiet=True,
-            )
-            last_state = _tsv_value(last_state)
-        except DeployError:
-            last_state = ""
-        if last_state.lower() == "succeeded":
+            app = runner.az_json([
+                "containerapp", "show",
+                "--name", name,
+                "--resource-group", resource_group,
+            ])
+            if not isinstance(app, dict):
+                raise DeployError("Azure devolvió una respuesta sin objeto JSON para la Container App.")
+            properties = app.get("properties") if isinstance(app.get("properties"), dict) else {}
+            last_state = str(properties.get("provisioningState") or "").strip()
+            consecutive_errors = 0
+            last_error = ""
+        except DeployError as exc:
+            consecutive_errors += 1
+            last_error = str(exc)
+            # Transient 404 while ARM finishes creating the resource is expected.
+            # Repeated CLI/authorization/transport errors are not a provisioning state.
+            if consecutive_errors >= 6:
+                raise DeployError(
+                    f"No se pudo consultar de forma fiable el estado de {name} después de "
+                    f"{consecutive_errors} intentos. No se interpretó stderr/CLIXML como estado. "
+                    f"Último detalle: {last_error[-1800:]}"
+                ) from exc
+
+        normalized = last_state.casefold()
+        if normalized == "succeeded":
             return
-        if last_state.lower() == "failed":
-            raise DeployError(f"Azure marcó {name} como Failed. Se intentará eliminar el Resource Group nuevo; los entornos Express reutilizados y Neon se conservan.")
+        if normalized in {"failed", "canceled", "cancelled"}:
+            error_details = properties.get("eventStreamEndpoint") or properties.get("deploymentErrors") or ""
+            raise DeployError(
+                f"Azure marcó la Container App {name} como {last_state}. "
+                f"Detalle de aprovisionamiento: {str(error_details)[:1600] or 'Azure no devolvió detalles.'} "
+                "Se intentará limpiar únicamente el Resource Group creado por este intento."
+            )
         time.sleep(10)
-    raise DeployError(f"Timeout esperando Container App {name} (último estado: {last_state or 'sin respuesta'}).")
+
+    state_text = last_state or "sin estado JSON"
+    detail = f"; último error de consulta: {last_error[-1200:]}" if last_error else ""
+    raise DeployError(
+        f"Timeout esperando Container App {name} (último estado: {state_text}{detail}). "
+        "El script no confundió advertencias de Azure CLI con estados de aprovisionamiento."
+    )
 
 
 def _fqdn(runner: Runner, app: str, resource_group: str) -> str:
-    value = runner.run(
-        [
-            "az",
-            "containerapp",
-            "show",
-            "--name",
-            app,
-            "--resource-group",
-            resource_group,
-            "--query",
-            "properties.configuration.ingress.fqdn",
-            "--output",
-            "tsv",
-        ],
-        quiet=True,
-    )
-    value = _tsv_value(value)
-    if not value or value.lower() == "none":
+    value = runner.az_json([
+        "containerapp", "show",
+        "--name", app,
+        "--resource-group", resource_group,
+    ])
+    properties = value.get("properties", {}) if isinstance(value, dict) else {}
+    configuration = properties.get("configuration", {}) if isinstance(properties, dict) else {}
+    ingress = configuration.get("ingress", {}) if isinstance(configuration, dict) else {}
+    fqdn = str(ingress.get("fqdn") or "").strip() if isinstance(ingress, dict) else ""
+    if not fqdn or fqdn.lower() == "none":
         raise DeployError(f"Azure todavía no devolvió el FQDN de {app}.")
-    return value
+    return fqdn
 
 
 def _create_containerapp(
@@ -2075,6 +2387,8 @@ def _cleanup_failed_resource_group(runner: Runner, state: dict) -> bool:
 def main() -> int:
     runner = Runner()
     previous_state = _load_state()
+    profile, saved_secrets = _load_deploy_profile()
+    profile_settings = profile.get("settings") if isinstance(profile.get("settings"), dict) else {}
     state: dict = {
         "run_id": secrets.token_hex(8),
         "status": "starting",
@@ -2095,36 +2409,81 @@ def main() -> int:
         if not (ROOT / "database" / "schema.sql").is_file():
             raise DeployError("No se encontró la raíz del proyecto FashionStore con database/schema.sql.")
 
-        print("FashionStore: despliegue asistido de prueba Azure Container Apps + Neon.")
+        print("FashionStore: despliegue asistido Azure Container Apps + Neon.")
         print("Azure Container Apps Express usa Consumption, escala a cero y no crea un entorno de pago, ACR ni Log Analytics.")
         print("Las imágenes públicas vienen de GHCR; Container Apps puede cobrar por uso/egress que exceda las concesiones gratis. No se garantiza $0.")
         print("Si el despliegue falla, se eliminará únicamente el Resource Group nuevo creado por este intento; Neon y entornos Express ajenos se conservarán.")
         print("Para conservar recursos de diagnóstico, ejecuta tools\\deploy_azure.py --keep-failed-resources.")
-        print("El preflight registra solo Microsoft.App si hace falta (metadatos; no crea recursos facturables).")
-        print("La ruta configurada usa imágenes públicas de GHCR; el prompt siguiente confirma que aceptas esa configuración.")
-        if not _prompt_yes_no("¿Confirmas usar GHCR con imágenes públicas? (s/N): ", default=False):
-            raise DeployError("GHCR no confirmado. No se registraron providers, no se modificó Neon y no se crearon recursos Azure.")
-        if not _prompt_exact_confirmation(
-            "Para continuar con las comprobaciones, escribe CONTINUAR: ", "CONTINUAR", purpose="continuar con el preflight"
-        ):
-            raise DeployError("Cancelado antes de abrir Neon o cambiar la suscripción/recursos.")
 
-        subscription_id, subscription_name = _subscription(runner, str(previous_state.get("subscription_id") or "") or None)
+        profile_mode = _select_profile_mode(profile)
+        if profile_mode == "cancel":
+            state["status"] = "cancelled"
+            state["updated_at"] = datetime.now(timezone.utc).isoformat()
+            _save_state(state)
+            print("Despliegue cancelado; no se modificó Neon ni Azure.")
+            return 0
+        if profile_mode == "edit":
+            _open_deploy_profile()
+            return 0
+        quick_mode = profile_mode == "quick"
+        if quick_mode:
+            print("\n[CONFIGURACIÓN RÁPIDA] Se reutilizarán las opciones anteriores. Solo se preguntará lo que falte o haya dejado de ser válido.")
+        else:
+            print("\n[CONFIGURACIÓN REVISADA] Puedes corregir los valores; se guardarán para el próximo despliegue.")
+            print("El archivo de configuración se generará automáticamente en builds\\deploy-profile.json.")
+            if not _prompt_yes_no("¿Confirmas usar GHCR con imágenes públicas? (s/N): ", default=False):
+                raise DeployError("GHCR no confirmado. No se registraron providers, no se modificó Neon y no se crearon recursos Azure.")
+            if not _prompt_exact_confirmation(
+                "Para continuar con las comprobaciones, escribe CONTINUAR: ", "CONTINUAR", purpose="continuar con el preflight"
+            ):
+                raise DeployError("Cancelado antes de abrir Neon o cambiar la suscripción/recursos.")
+
+        saved_subscription = str(profile_settings.get("subscription_id") or previous_state.get("subscription_id") or "")
+        subscription_id, subscription_name = _subscription(
+            runner, saved_subscription or None, auto_select=quick_mode
+        )
         default_region, allowed_regions = _default_region(runner)
         if allowed_regions:
             print("Tu suscripción solo permite estas regiones compatibles con Express: " + ", ".join(allowed_regions))
-        saved_location = str(previous_state.get("location") or default_region)
-        location = _prompt_region(
-            runner,
-            f"Región Azure (nombre corto) [{saved_location}]: ",
-            saved_location,
-            allowed_regions=allowed_regions or None,
-        )
+        saved_location = str(profile_settings.get("location") or previous_state.get("location") or default_region)
+        if quick_mode and saved_location:
+            try:
+                location = _normal_region(saved_location)
+                _validate_location(runner, location)
+                if allowed_regions and location not in {_normal_region(value) for value in allowed_regions}:
+                    raise DeployError("La región guardada ya no está permitida por esta suscripción.")
+                print(f"[OK] Se reutiliza la región guardada: {location}.")
+            except DeployError as exc:
+                print(f"[AVISO] La región guardada ya no es válida: {exc}")
+                location = _prompt_region(
+                    runner, f"Región Azure (nombre corto) [{default_region}]: ", default_region,
+                    allowed_regions=allowed_regions or None,
+                )
+        else:
+            location = _prompt_region(
+                runner, f"Región Azure (nombre corto) [{saved_location}]: ", saved_location,
+                allowed_regions=allowed_regions or None,
+            )
+
         location, existing_environment = _choose_express_environment(
-            runner, subscription_id, location, allowed_regions or [location]
+            runner,
+            subscription_id,
+            location,
+            allowed_regions or [location],
+            preferred_environment_id=str(profile_settings.get("environment_id") or "") or None,
+            auto_select=quick_mode,
         )
-        saved_owner = str(previous_state.get("ghcr_owner") or "")
-        ghcr_owner = _prompt_ghcr_owner(saved_owner)
+        saved_owner = str(profile_settings.get("ghcr_owner") or previous_state.get("ghcr_owner") or "")
+        if quick_mode and saved_owner:
+            try:
+                ghcr_owner = normalize_ghcr_owner(saved_owner)
+                print(f"[OK] Se reutiliza el owner GHCR guardado: {ghcr_owner}.")
+            except DeployError as exc:
+                print(f"[AVISO] El owner GHCR guardado no es válido: {exc}")
+                ghcr_owner = _prompt_ghcr_owner(saved_owner)
+        else:
+            ghcr_owner = _prompt_ghcr_owner(saved_owner)
+
         names = _resource_names()
         if existing_environment:
             names["environment"] = existing_environment["name"]
@@ -2133,49 +2492,116 @@ def main() -> int:
         if existing_environment:
             print(f"Se reutilizará {existing_environment['name']} del Resource Group {existing_environment.get('resource_group') or '(no identificado)'}. No se eliminará ese entorno.")
 
-        # Register ACA providers before resource preflight; this updates metadata only.
+        profile_settings.update({
+            "ghcr_public": True, "subscription_id": subscription_id, "subscription_name": subscription_name,
+            "location": location, "ghcr_owner": ghcr_owner,
+            "environment_id": str(existing_environment.get("id") if existing_environment else profile_settings.get("environment_id") or ""),
+            "environment_name": str(existing_environment.get("name") if existing_environment else ""),
+            "environment_resource_group": str(existing_environment.get("resource_group") if existing_environment else ""),
+            "neon_strategy": "reuse",
+        })
+        profile = {"settings": profile_settings, **({"secrets_protected": profile.get("secrets_protected"), "secret_protection": profile.get("secret_protection")} if profile.get("secrets_protected") else {})}
+        _save_deploy_profile(profile, {key: value for key, value in saved_secrets.items() if not key.startswith("__")})
+
         _ensure_providers_registered(runner)
         _check_azure_preflight(runner, subscription_id, location, names)
         ghcr_owner, image_urls = _check_ghcr_images_with_retry(ghcr_owner)
         state["ghcr_owner"] = ghcr_owner
         print("Preflight Azure y lectura anónima de las tres imágenes GHCR correctos; aún no se han creado recursos.")
-        print("\nAbriendo Neon. Usa una base/branch dedicada a FashionStore; no pegues una base con datos ajenos.")
-        print("Puedes pegar la URL directa o pooled; el asistente convertirá -pooler al endpoint directo para migraciones.")
-        print("La URL se pedirá oculta, se usará localmente y no se guardará en archivos del repo.")
-        print(f"Si el navegador no abre automáticamente, visita: {NEON_CONSOLE}")
-        webbrowser.open(NEON_CONSOLE)
-        owner, neon_state = _prompt_and_preflight_neon(runner)
+        profile_settings.update({
+            "ghcr_public": True, "subscription_id": subscription_id, "subscription_name": subscription_name,
+            "location": location, "ghcr_owner": ghcr_owner,
+            "environment_id": str(existing_environment.get("id") if existing_environment else profile_settings.get("environment_id") or ""),
+            "environment_name": str(existing_environment.get("name") if existing_environment else ""),
+            "environment_resource_group": str(existing_environment.get("resource_group") if existing_environment else ""),
+            "neon_strategy": "reuse",
+        })
+        profile = {"settings": profile_settings, **({"secrets_protected": profile.get("secrets_protected"), "secret_protection": profile.get("secret_protection")} if profile.get("secrets_protected") else {})}
+        _save_deploy_profile(profile, {key: value for key, value in saved_secrets.items() if not key.startswith("__")})
+
+        saved_neon_url = str(saved_secrets.get("neon_url") or "")
+        if not quick_mode:
+            print("\nAbriendo Neon. Usa una base/branch dedicada a FashionStore; no pegues una base con datos ajenos.")
+            print("Puedes pegar la URL directa o pooled; el asistente convertirá -pooler al endpoint directo para migraciones.")
+            print("La URL se solicitará oculta y se guardará cifrada en el perfil local de Windows.")
+            print(f"Si el navegador no abre automáticamente, visita: {NEON_CONSOLE}")
+            webbrowser.open(NEON_CONSOLE)
+        elif saved_neon_url:
+            print("[OK] Se intentará reutilizar la conexión Neon guardada (credenciales cifradas).")
+        else:
+            print("[AVISO] No hay una conexión Neon guardada disponible; se abrirá Neon para que puedas introducirla.")
+            webbrowser.open(NEON_CONSOLE)
+        owner, neon_state = _prompt_and_preflight_neon(
+            runner, saved_neon_url or None, auto_use_saved=quick_mode
+        )
         if owner.input_was_pooled:
             print("Detecté -pooler en el host y lo normalicé automáticamente para ejecutar schema/migraciones/seed.")
         state.update({"neon_database": owner.database, "neon_input_was_pooled": owner.input_was_pooled, "neon_state_before_restore": neon_state})
         _save_state(state)
+
         reset_existing = False
         reuse_existing = False
         if neon_state == "fashionstore":
-            print("Se detectó una base con tablas de FashionStore.")
-            print("  1) REUTILIZAR (recomendado): conservar pedidos, clientes, pagos y demás datos; verificar cuentas y permisos.")
-            print("  2) RESTAURAR DEMO: borrar los objetos/datos de public y volver a aplicar esquema, migraciones y seed.")
-            print("  3) CANCELAR: salir sin modificar Neon.")
-            while True:
-                choice = input("Elige una opción [1-3] [1]: ").strip() or "1"
-                if choice == "1":
-                    reuse_existing = True
-                    break
-                if choice == "2":
-                    reset_existing = _prompt_exact_confirmation(
-                        "Para confirmar la restauración destructiva escribe RESTABLECER-DEMO: ",
-                        "RESTABLECER-DEMO",
-                        purpose="borrar y reconstruir el esquema public de Neon",
-                    )
-                    if not reset_existing:
-                        raise DeployError("Restauración cancelada; Neon no se modificó.")
-                    break
-                if choice == "3" or choice.casefold() in CANCEL_VALUES:
-                    raise DeployError("Cancelado; Neon no se modificó.")
-                print("Opción inválida. Vuelve a introducir 1, 2 o 3; puedes corregir la respuesta.")
+            saved_neon_strategy = str(profile_settings.get("neon_strategy") or "reuse").casefold()
+            if quick_mode and saved_neon_strategy == "reuse":
+                reuse_existing = True
+                print("[OK] Se reutilizará la base FashionStore existente. No se borrarán pedidos, clientes, pagos ni registros.")
+            else:
+                print("Se detectó una base con tablas de FashionStore.")
+                print("  1) REUTILIZAR (recomendado): conservar pedidos, clientes, pagos y demás datos; verificar cuentas y permisos.")
+                print("  2) RESTAURAR DEMO: borrar los objetos/datos de public y volver a aplicar esquema, migraciones y seed.")
+                print("  3) CANCELAR: salir sin modificar Neon.")
+                while True:
+                    choice = input("Elige una opción [1-3] [1]: ").strip() or "1"
+                    if choice == "1":
+                        reuse_existing = True
+                        break
+                    if choice == "2":
+                        reset_existing = _prompt_exact_confirmation(
+                            "Para confirmar la restauración destructiva escribe RESTABLECER-DEMO: ",
+                            "RESTABLECER-DEMO",
+                            purpose="borrar y reconstruir el esquema public de Neon",
+                        )
+                        if not reset_existing:
+                            raise DeployError("Restauración cancelada; Neon no se modificó.")
+                        break
+                    if choice == "3" or choice.casefold() in CANCEL_VALUES:
+                        raise DeployError("Cancelado; Neon no se modificó.")
+                    print("Opción inválida. Vuelve a introducir 1, 2 o 3; puedes corregir la respuesta.")
 
-        llm_credentials = _read_optional_llm_credentials()
+        saved_llm_credentials = saved_secrets.get("llm_credentials") if isinstance(saved_secrets.get("llm_credentials"), dict) else {}
+        if quick_mode and isinstance(profile_settings.get("llm_providers"), list):
+            enabled_saved_providers = {str(value).casefold() for value in profile_settings.get("llm_providers", [])}
+            saved_llm_credentials = {key: value for key, value in saved_llm_credentials.items() if key in enabled_saved_providers}
+        llm_credentials = _read_optional_llm_credentials(
+            saved_llm_credentials,
+            auto_use_saved=quick_mode and bool(saved_secrets.get("__profile_secrets_loaded__")) and not bool(saved_secrets.get("__decrypt_failed__")),
+            preferred_providers=profile_settings.get("llm_providers", []),
+        )
         runner.add_sensitive(*(llm_credentials or {}).values())
+
+        # Save choices and encrypted credentials before the destructive/deployment confirmation.
+        profile_settings = {
+            **profile_settings,
+            "ghcr_public": True,
+            "subscription_id": subscription_id,
+            "subscription_name": subscription_name,
+            "location": location,
+            "ghcr_owner": ghcr_owner,
+            "environment_id": str(existing_environment.get("id") if existing_environment else profile_settings.get("environment_id") or ""),
+            "environment_name": str(existing_environment.get("name") if existing_environment else ""),
+            "environment_resource_group": str(existing_environment.get("resource_group") if existing_environment else ""),
+            "neon_strategy": "reuse",
+            "llm_providers": sorted(llm_credentials),
+            "notes": "Los datos secretos están cifrados con Windows DPAPI en secrets_protected.",
+        }
+        profile = {"settings": profile_settings}
+        saved_secrets = {"neon_url": owner.original_url, "llm_credentials": llm_credentials}
+        _save_deploy_profile(profile, saved_secrets)
+        if not _supports_dpapi():
+            print("[AVISO] Este sistema no ofrece DPAPI; las credenciales no se guardarán y se solicitarán nuevamente en la próxima ejecución.")
+        else:
+            print(f"[OK] Configuración guardada en {DEPLOY_PROFILE.relative_to(ROOT)}; credenciales cifradas con Windows DPAPI.")
 
         print("\nConfirmación final:")
         if reuse_existing:
@@ -2229,6 +2655,16 @@ def main() -> int:
             allowed_regions=allowed_regions,
         )
 
+        # Remember the environment actually used, including a quota-recovery selection.
+        profile_settings.update({
+            "location": result.get("location", location),
+            "environment_id": str(state.get("environment_id") or ""),
+            "environment_name": str(result.get("environment") or names.get("environment") or ""),
+            "environment_resource_group": str(existing_environment.get("resource_group") if existing_environment else result.get("resource_group") or ""),
+        })
+        profile = {"settings": profile_settings}
+        _save_deploy_profile(profile, saved_secrets)
+
         print("\nEsperando FastAPI HTTPS en /health ...")
         if not _wait_http(f"{result['fastapi_url']}/health"):
             raise DeployError("FastAPI no pasó /health tras 3 minutos. Se intentará eliminar el Resource Group nuevo; Neon se conserva.")
@@ -2258,7 +2694,13 @@ def main() -> int:
         print(f"Resource Group de prueba: {result['resource_group']}")
 
         try:
-            stripe_configured = maybe_enable_stripe(runner, result, api_payload)
+            if quick_mode and profile_settings.get("stripe_setup_choice") == "skip":
+                stripe_configured = False
+                print("[OK] Stripe se omitió según el perfil anterior; no se volverá a preguntar.")
+            else:
+                stripe_configured = maybe_enable_stripe(runner, result, api_payload)
+            profile_settings["stripe_setup_choice"] = "configured" if stripe_configured else "skip"
+            _save_deploy_profile({"settings": profile_settings}, saved_secrets)
             state["stripe_test_configured"] = stripe_configured
             state["updated_at"] = datetime.now(timezone.utc).isoformat()
             _save_state(state)
@@ -2273,6 +2715,7 @@ def main() -> int:
 
         print("\nEl despliegue respondió en vivo; esto no acredita una operación de compra ni un webhook Stripe real.")
         print(f"Metadatos sin secretos: {BUILD_STATE.relative_to(ROOT)}")
+        print(f"Perfil reutilizable: {DEPLOY_PROFILE.relative_to(ROOT)}")
         print("Express usa concesiones gratuitas compartidas por suscripción (180,000 vCPU-s, 360,000 GiB-s y 2 M solicitudes/mes publicadas); el exceso/egress puede facturarse. Revisa el costo y elimina el RG al terminar.")
         print("Limpieza (solo tras verificar que el RG contiene esta prueba): az group delete --name " + result["resource_group"] + " --yes --no-wait")
         return 0
