@@ -74,6 +74,30 @@ class AzureApkPipelineTests(unittest.TestCase):
         config_source = (ROOT / "mobile-app/src/config.ts").read_text(encoding="utf-8")
         self.assertIn("APP_VERSION = '2.0.1'", config_source)
 
+    def test_mobile_version_metadata_stays_aligned(self) -> None:
+        package = json.loads((ROOT / "mobile-app/package.json").read_text(encoding="utf-8"))
+        lock = json.loads((ROOT / "mobile-app/package-lock.json").read_text(encoding="utf-8"))
+        app = json.loads((ROOT / "mobile-app/app.json").read_text(encoding="utf-8"))["expo"]
+        self.assertEqual(package["version"], "2.0.1")
+        self.assertEqual(lock["version"], package["version"])
+        self.assertEqual(lock["packages"][""]["version"], package["version"])
+        self.assertEqual(app["version"], package["version"])
+
+    def test_assistant_detail_status_is_declared_before_use(self) -> None:
+        source = (ROOT / "backend-nest/src/ia/asistente-context.ts").read_text(encoding="utf-8")
+        function_start = source.index("function isAssistantDetailRequest(")
+        function_end = source.index("\n}", function_start)
+        function_source = source[function_start:function_end]
+        declaration = function_source.index("const specificStatus =")
+        first_use = function_source.index("specificStatus", declaration + len("const specificStatus ="))
+        self.assertLess(declaration, first_use)
+        self.assertNotIn("!specificStatus", function_source[:declaration])
+
+    def test_nest_dockerfile_uses_same_peer_dependency_resolution_as_ci(self) -> None:
+        source = (ROOT / "backend-nest/Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("RUN npm ci --legacy-peer-deps", source)
+        self.assertIn("RUN npm ci --omit=dev --legacy-peer-deps", source)
+
 
 if __name__ == "__main__":
     unittest.main()
