@@ -11,6 +11,7 @@ from __future__ import annotations
 import getpass
 import json
 import base64
+import ntpath
 import ctypes
 from ctypes import wintypes
 import hashlib
@@ -210,7 +211,7 @@ class Runner:
         self.sensitive.extend(str(value) for value in values if value)
 
     @staticmethod
-    def _windows_az_command(args: Sequence[str], env: dict[str, str]) -> list[str]:
+    def _windows_az_command(args: Sequence[str], env: dict[str, str]) -> list[str] | str:
         az_executable = shutil.which("az")
         if not az_executable:
             raise DeployError("No se encontró Azure CLI (az) en PATH.")
@@ -219,13 +220,49 @@ class Runner:
         if suffix not in {".cmd", ".bat"}:
             return [az_executable, *[str(value) for value in args]]
 
-        comspec = env.get("COMSPEC") or shutil.which("cmd.exe") or "cmd.exe"
-        # list2cmdline applies Windows argument quoting. The additional outer
-        # quotes are required by cmd.exe /s /c when the executable path contains
-        # spaces. No argument is inserted into PowerShell source or a script.
-        command_line = subprocess.list2cmdline([az_executable, *[str(value) for value in args]])
-        command_line = f'"{command_line}"'
-        return [comspec, "/d", "/s", "/c", command_line]
+        # Prefer cmd.exe from the local Windows installation. COMSPEC can be
+        # customized by terminals, remote sessions, or enterprise logon scripts;
+        # an invalid/UNC COMSPEC was causing 'The network path was not found'
+        # before Azure CLI even received `account list`.
+        system_root = env.get("SystemRoot") or env.get("WINDIR") or r"C:\Windows"
+        local_cmd = ntpath.join(system_root, "System32", "cmd.exe")
+        candidates = [local_cmd, env.get("COMSPEC", ""), shutil.which("cmd.exe") or ""]
+        comspec = ""
+        for candidate in candidates:
+            candidate = str(candidate or "").strip().strip('"')
+            if not candidate:
+                continue
+            normalized = candidate.replace("/", "\\")
+            # Do not trust network/UNC shells for this local deployment runner.
+            if normalized.startswith("\\\\") and not normalized.startswith("\\\\?\\"):
+                continue
+            if os.path.isfile(candidate):
+                comspec = candidate
+                break
+        if not comspec:
+            raise DeployError(
+                "No se encontró cmd.exe en la instalación local de Windows. "
+                "Comprueba SystemRoot y ejecuta `where cmd` desde CMD."
+            )
+
+        # Invoke a batch file with CALL. Starting /c with a quoted executable
+        # and wrapping the whole command in another pair of quotes (/s /c)
+        # is fragile: CMD may strip the wrong quote pair when paths contain
+        # spaces. With CALL as the first token, /c receives a plain command;
+        # list2cmdline quotes each path/argument separately.
+        # Also normalize COMSPEC in the child environment in case the az.cmd
+        # wrapper or an extension starts another CMD process.
+        env["COMSPEC"] = comspec
+        quoted_cmd = f'"{comspec}"'
+        quoted_executable = subprocess.list2cmdline([az_executable])
+        quoted_arguments = subprocess.list2cmdline([str(value) for value in args])
+        command = f"call {quoted_executable}"
+        if quoted_arguments:
+            command += " " + quoted_arguments
+        # Pass one raw CreateProcess command line. If this were passed as a
+        # Python list, Python would quote the /c payload again; CMD can then
+        # misparse the nested quotes around paths containing spaces.
+        return f"{quoted_cmd} /d /c {command}"
 
     def run(
         self,
@@ -245,10 +282,18 @@ class Runner:
         else:
             actual = cmd
 
+        # The launcher BAT already changes to the project folder. Inheriting
+        # that current directory for Azure CLI avoids a second Windows cwd
+        # resolution through OneDrive/network-backed paths. Other tools retain
+        # the explicit project ROOT as their working directory.
+        run_cwd = str(cwd or ROOT)
+        if os.name == "nt" and cmd and cmd[0].lower() == "az" and cwd is None:
+            run_cwd = None  # type: ignore[assignment]
+
         try:
             completed = subprocess.run(
                 actual,
-                cwd=str(cwd or ROOT),
+                cwd=run_cwd,
                 env=env,
                 text=True,
                 encoding="utf-8",
@@ -265,6 +310,21 @@ class Runner:
         if completed.returncode != 0:
             parts = [part for part in (output, error_output) if part]
             detail = "\n".join(parts)[-7000:] if parts else "sin detalle del proceso"
+            network_path_error = any(
+                marker in detail.casefold()
+                for marker in (
+                    "no se ha encontrado la ruta de acceso de la red",
+                    "the network path was not found",
+                    "network path was not found",
+                )
+            )
+            if network_path_error and os.name == "nt" and cmd and cmd[0].lower() == "az":
+                detail += (
+                    "\n\nDiagnóstico: CMD no pudo resolver la ruta del proceso. "
+                    "La nueva versión fuerza el cmd.exe local de Windows y ejecuta az.cmd con CALL. "
+                    "Si persiste, abre CMD (no PowerShell) en la carpeta del proyecto y comprueba: "
+                    "where cmd & where az & echo %COMSPEC% & az account show."
+                )
             raise DeployError(f"Falló {cmd[0]} (código {completed.returncode}). Salida saneada:\n{detail}")
 
         if not quiet:
@@ -1352,6 +1412,24 @@ def prepare_neon_database(
     return runtime_url, runtime_password, report
 
 
+def _verify_azure_cli_runner(runner: Runner) -> dict:
+    """Run a read-only Azure CLI smoke test through the exact Python runner path."""
+    try:
+        account = runner.az_json(["account", "show"])
+    except DeployError as exc:
+        raise DeployError(
+            "Azure CLI funciona desde el BAT, pero no pudo ejecutarse desde Python. "
+            "No se ha consultado ni modificado ninguna suscripción ni recurso Azure. "
+            f"Detalle: {exc}"
+        ) from exc
+    if not isinstance(account, dict) or not str(account.get("id") or "").strip():
+        raise DeployError(
+            "Azure CLI no devolvió una sesión activa válida. Ejecuta `az login` desde CMD y vuelve a intentarlo."
+        )
+    print(f"[OK] Azure CLI también responde desde Python: {account.get('name') or 'suscripción activa'}.")
+    return account
+
+
 def _subscription(runner: Runner, preferred_id: str | None = None, *, auto_select: bool = False) -> tuple[str, str]:
     accounts = runner.az_json(["account", "list"])
     if not isinstance(accounts, list):
@@ -2401,6 +2479,10 @@ def main() -> int:
     try:
         if not shutil.which("az"):
             raise DeployError("Falta Azure CLI (az). Ejecuta desplegar-azure.bat en Windows con Azure CLI instalada.")
+        # Check the Python-to-CLI bridge before showing prompts or collecting
+        # Neon/API credentials. The BAT's own `call az` check is not enough:
+        # it does not exercise Runner's subprocess invocation path.
+        _verify_azure_cli_runner(runner)
         if not _sql_driver():
             raise DeployError(
                 "Falta un cliente SQL: instala PostgreSQL Command Line Tools (psql), "

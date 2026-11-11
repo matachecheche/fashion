@@ -89,6 +89,31 @@ class NeonConnectionTests(unittest.TestCase):
         self.assertNotIn("ultra-private", str(error.exception))
 
 
+class AzureCliRunnerPreflightTests(unittest.TestCase):
+    def test_python_runner_verifies_active_azure_account_read_only(self):
+        class FakeRunner:
+            def __init__(self):
+                self.calls = []
+            def az_json(self, args):
+                self.calls.append(args)
+                return {"id": "synthetic-subscription", "name": "Azure Students"}
+
+        runner = FakeRunner()
+        account = deploy._verify_azure_cli_runner(runner)
+        self.assertEqual(account["id"], "synthetic-subscription")
+        self.assertEqual(runner.calls, [["account", "show"]])
+
+    def test_python_runner_reports_cmd_launch_failure_before_prompting(self):
+        class FakeRunner:
+            def az_json(self, _args):
+                raise deploy.DeployError("Falló az (código 1). Salida saneada: No se ha encontrado la ruta de acceso de la red.")
+
+        with self.assertRaisesRegex(deploy.DeployError, "no pudo ejecutarse desde Python") as error:
+            deploy._verify_azure_cli_runner(FakeRunner())
+        self.assertIn("No se ha encontrado la ruta de acceso de la red", str(error.exception))
+        self.assertIn("No se ha consultado ni modificado", str(error.exception))
+
+
 class AzureResourceGroupPreflightTests(unittest.TestCase):
     def test_resource_group_exists_parses_json_boolean_and_uses_subscription(self) -> None:
         class FakeRunner:
@@ -850,7 +875,7 @@ class LocalSafetyRegressionTests(unittest.TestCase):
         self.assertNotIn(secret, str(error.exception))
         self.assertIn("[REDACTED]", str(error.exception))
 
-    def test_windows_runner_uses_cmd_without_powerShell_clixml_and_preserves_arguments(self) -> None:
+    def test_windows_runner_uses_local_cmd_call_and_preserves_arguments(self) -> None:
         runner = deploy.Runner()
         az_cmd = r"C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
         comspec = r"C:\Windows\System32\cmd.exe"
@@ -867,19 +892,50 @@ class LocalSafetyRegressionTests(unittest.TestCase):
                 return comspec
             return None
 
-        with patch.object(deploy.os, "name", "nt"), patch.object(deploy.shutil, "which", side_effect=which), patch.object(
-            deploy.subprocess, "run", return_value=completed
-        ) as run:
+        def isfile(path):
+            return str(path).lower() == comspec.lower()
+
+        with patch.object(deploy.os, "name", "nt"), patch.object(deploy.os.path, "isfile", side_effect=isfile), patch.object(
+            deploy.shutil, "which", side_effect=which
+        ), patch.object(deploy.subprocess, "run", return_value=completed) as run:
             self.assertEqual(runner.run(["az", *expected_args], quiet=True), "OK")
 
         command = run.call_args.args[0]
-        self.assertEqual(command[:3], [comspec, "/d", "/s"])
-        self.assertEqual(command[3], "/c")
-        self.assertIn('az.cmd', command[4])
-        self.assertIn('"East US"', command[4])
-        self.assertIn('"@C:\\Users\\Test User\\AppData\\Local\\Temp\\payload.json"', command[4])
-        self.assertNotIn("powershell", " ".join(command).lower())
+        self.assertIsInstance(command, str)
+        self.assertTrue(command.startswith('"' + comspec + '" /d /c call '))
+        self.assertIn('"' + az_cmd + '"', command)
+        self.assertIn('"East US"', command)
+        self.assertIn('"@C:\\Users\\Test User\\AppData\\Local\\Temp\\payload.json"', command)
+        self.assertNotIn("/s", command)
+        self.assertNotIn("powershell", command.lower())
         self.assertNotIn("FASHIONSTORE_AZ_ARGS_JSON", run.call_args.kwargs["env"])
+        self.assertEqual(run.call_args.kwargs["env"]["COMSPEC"], comspec)
+        # Azure CLI inherits the working directory already set by the launcher BAT.
+        self.assertIsNone(run.call_args.kwargs["cwd"])
+
+    def test_windows_runner_ignores_unc_comspec_and_uses_local_system_cmd(self) -> None:
+        az_cmd = r"C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"
+        local_cmd = r"C:\Windows\System32\cmd.exe"
+        network_comspec = r"\\server\share\cmd.exe"
+
+        def which(name):
+            if name == "az":
+                return az_cmd
+            if name == "cmd.exe":
+                return network_comspec
+            return None
+
+        def isfile(path):
+            return str(path).lower() == local_cmd.lower()
+
+        env = {"SystemRoot": r"C:\Windows", "COMSPEC": network_comspec}
+        with patch.object(deploy.os, "name", "nt"), patch.object(deploy.os.path, "isfile", side_effect=isfile), patch.object(
+            deploy.shutil, "which", side_effect=which
+        ):
+            command = deploy.Runner._windows_az_command(["account", "list"], env)
+        self.assertIsInstance(command, str)
+        self.assertTrue(command.startswith('"' + local_cmd + '" /d /c call '))
+        self.assertEqual(env["COMSPEC"], local_cmd)
 
     def test_runner_keeps_successful_azure_stderr_out_of_structured_stdout(self) -> None:
         runner = deploy.Runner()
