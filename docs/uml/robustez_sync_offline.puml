@@ -1,0 +1,42 @@
+@startuml robustez_sync_offline
+left to right direction
+skinparam shadowing false
+skinparam linetype ortho
+skinparam classAttributeIconSize 0
+skinparam class {
+  BackgroundColor #F5F8FF
+  BorderColor #315A86
+  ArrowColor #52677D
+}
+
+object "Cajero\n<<actor>>" as Actor
+object "POS móvil\n<<boundary>>" as POS
+object "Outbox SQLite\n<<entity local>>" as Outbox
+object "SyncController\n<<control>>" as SyncAPI
+object "VentaController\n<<control>>" as VentaCtrl
+object "operaciones_offline / idempotencia\n<<entity>>" as OpEntity
+object "venta + items + stock\n<<entity>>" as SaleEntity
+object "conflictos_sync\n<<entity>>" as ConflictEntity
+
+Actor --> POS : 1. registra venta efectivo
+POS --> Outbox : 2. guarda UUID + payload
+POS --> SyncAPI : 3. reintenta al volver red
+SyncAPI --> OpEntity : 4. consulta clave + hash
+SyncAPI --> VentaCtrl : 5. operación nueva válida
+VentaCtrl --> SaleEntity : 6a. stock alcanza → confirma venta
+VentaCtrl --> ConflictEntity : 6b. stock insuficiente → conflicto
+SyncAPI --> POS : 7. resultado sincronizada/conflicto
+POS --> Outbox : 8. actualiza estado local
+
+note bottom of OpEntity
+  Replay mismo hash → devolver respuesta guardada.
+  Misma clave con hash distinto → rechazar.
+end note
+note bottom of ConflictEntity
+  `test:sync-conflicts` pasó contra PostgreSQL 17.11
+  en esquema 10: persistencia, reintento único, replay y descarte.
+  El panel móvil permite reintentar o descartar; Inventario ofrece
+  transferir stock antes de reintentar.
+  Competencia de varios dispositivos físicos sigue pendiente.
+end note
+@enduml

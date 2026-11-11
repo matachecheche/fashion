@@ -1,0 +1,13 @@
+{
+  "project": "fashionstore-backend-nest",
+  "status": "verified",
+  "build_verified": true,
+  "test_verified": true,
+  "checks": {
+    "compile": "PASS",
+    "tenant_rls": "PASS",
+    "demo_quotas": "PASS",
+    "offline_sync": "PASS",
+    "reports_export": "PASS"
+  }
+}

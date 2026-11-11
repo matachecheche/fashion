@@ -1,0 +1,14 @@
+{
+  "project": "fashionstore-backend-nest",
+  "targetNode": "20.x",
+  "targetTypeScript": "5.7.x",
+  "steps": [
+    "npm ci",
+    "npm run build",
+    "npm run test:smoke",
+    "npm run test:subscription",
+    "npm run test:sync",
+    "npm run test:reportes",
+    "npm run test:ia"
+  ]
+}

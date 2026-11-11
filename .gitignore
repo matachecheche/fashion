@@ -1,0 +1,25 @@
+# Dependencias y builds
+node_modules/
+dist/
+.expo/
+.next/
+build/
+builds/
+.venv-ia/
+__pycache__/
+*.pyc
+
+# Secretos reales (solo .env.example se commitea)
+.env
+*.local
+mobile-app/builds/
+proyecto.zip
+
+# SO / editor
+.DS_Store
+Thumbs.db
+*.log
+
+# Empaquetado (no versionar artefactos generados)
+proyecto.zip
+manifest.sha256

@@ -1,0 +1,57 @@
+{
+  "name": "fashionstore-backend-nest",
+  "version": "2.0.0",
+  "private": true,
+  "description": "API Comercial SaaS Multi-Tenant de FashionStore (NestJS + PostgreSQL RLS)",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "start:dev": "tsc -p tsconfig.json && node dist/main.js",
+    "test:smoke": "node test/smoke.mjs",
+    "test:payments": "node test/payments-saga.mjs",
+    "test:subscription": "node test/subscription.mjs",
+    "test:sync": "node test/sync-pull.mjs",
+    "test:sync-conflicts": "node test/sync-conflicts.mjs",
+    "test:reportes": "node test/reportes-ia-export.mjs",
+    "test:ia": "node test/ia-proxy.mjs",
+    "test:ia-context": "npm run build && node test/asistente-context.mjs",
+    "test:ml-persistence": "node test/ml-persistence.mjs",
+    "test:security": "node test/security-bootstrap.mjs",
+    "test:stripe-webhook": "node test/stripe-checkout-webhook.mjs"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.2.9",
+    "@nestjs/core": "^11.2.9",
+    "@nestjs/platform-express": "^11.2.9",
+    "@nestjs/serve-static": "^5.0.5",
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.4.7",
+    "exceljs": "^4.4.0",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.4",
+    "helmet": "^8.3.0",
+    "jsonwebtoken": "^9.0.2",
+    "pdfkit": "^0.15.2",
+    "pg": "^8.13.3",
+    "qrcode": "^1.5.4",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "stripe": "^23.1.0"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^20.17.10",
+    "@types/pdfkit": "^0.13.5",
+    "@types/pg": "^8.11.10",
+    "@types/qrcode": "^1.5.6",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "overrides": {
+    "uuid": "11.1.1"
+  }
+}

@@ -1,0 +1,78 @@
+@startuml secuencia_pago_sandbox
+hide footbox
+autonumber
+skinparam shadowing false
+skinparam sequence {
+  ArrowColor #315A86
+  LifeLineBorderColor #7A8EA6
+  LifeLineBackgroundColor #F5F8FF
+  ParticipantBorderColor #315A86
+  ParticipantBackgroundColor #F5F8FF
+}
+
+actor Cliente
+actor Administrador
+participant "Checkout Web/App" as UI
+participant "Panel de ventas/admin" as Panel
+participant "API Ventas/Pagos" as API
+participant "Proveedor de pago\n(sandbox / real autorizado)" as Provider
+database "PostgreSQL\n+ saga_pago" as DB
+
+Cliente -> UI : solicita pagar
+UI -> API : crear venta QR/tarjeta
+API -> DB : BEGIN; crear venta y pago pendiente
+API -> DB : reservar stock + registrar saga
+API -> DB : COMMIT
+API --> UI : PENDIENTE / NO_CONFIRMADO + referencia
+UI --> Cliente : mostrar QR/instrucciones sandbox
+
+Provider -> API : webhook de resolución
+API -> API : comprobar autenticidad, referencia, monto y expiración
+note right of API
+  Obligatorio antes de acreditar:
+  firma HMAC válida y en tiempo constante,
+  referencia/nonce del pago esperado,
+  monto y moneda iguales,
+  timestamp/expiración dentro de tolerancia,
+  evento idempotente.
+  El cumplimiento de todos estos controles
+  requiere test de regresión por proveedor.
+end note
+
+alt webhook inválido, expirado o inconsistente
+  API --> Provider : 4xx / no confirmar
+  API --> UI : estado sin cambios; registrar rechazo seguro
+else webhook aprobado válido
+  API -> DB : BEGIN; lock pago + venta + saga
+  API -> DB : revalidar estado e intento activo
+  API -> DB : confirmar stock retenido
+  alt stock/estado permite confirmar
+    API -> DB : venta pagada; pago aprobado; saga VENTA_CONFIRMADA
+    API -> DB : COMMIT
+    API --> Provider : 2xx idempotente
+    API --> UI : pago aprobado
+  else no se puede crear/confirmar venta
+    API -> DB : aprobado_sin_venta + REQUIERE_INTERVENCION
+    API -> DB : persistir clave idempotente de reembolso y notificar admin
+    API -> DB : COMMIT
+    API --> Provider : 2xx después de persistir el evento
+    API --> UI : pago confirmado; pedido requiere atención/reembolso
+    Administrador -> Panel : solicita registrar compensación sandbox
+    Panel -> API : POST /pagos/{id}/reembolsar-sandbox
+    API -> DB : comprobar tenant/estado/monto; guardar clave idempotente
+    API -> DB : marcar pago y saga COMPENSADA
+    API --> Panel : sandbox_simulado; cobro_real=false
+    Panel --> Administrador : operación registrada, sin movimiento de dinero
+    note right of DB
+      Esto solo registra una simulación.
+      `test:payments` pasó 8/8 pasos en PostgreSQL local,
+      incluida aprobación tardía y reembolso sandbox idempotente.
+      Reembolso externo/settlement no está implementado.
+    end note
+  end
+else proveedor rechaza o vence
+  API -> DB : liberar reserva de stock; actualizar pago/venta/saga
+  API --> UI : rechazado/expirado; permitir reintento válido
+end
+
+@enduml

@@ -1,0 +1,165 @@
+name: CI — FashionStore
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend-nest:
+    name: NestJS API (build + seguridad + 8 suites de integración)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: fashionstore
+          POSTGRES_USER: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d fashionstore"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres@localhost:5432/fashionstore
+      DATABASE_SSL: "false"
+      JWT_EXPIRES_IN: 12h
+      PAGOS_MODO: sandbox
+      FASTAPI_URL: http://127.0.0.1:8000
+      PUBLIC_API_URL: http://localhost:3000
+      CORS_ORIGINS: http://localhost:5173
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generar secretos efímeros para las pruebas
+        shell: bash
+        run: |
+          {
+            printf 'JWT_SECRET=%s\n' "$(openssl rand -hex 32)"
+            printf 'STRIPE_WEBHOOK_SECRET=\n'
+            printf 'STRIPE_SIMULATOR_WEBHOOK_SECRET=%s\n' "$(openssl rand -hex 32)"
+            printf 'LIBELULA_APP_KEY=%s\n' "$(openssl rand -hex 32)"
+            printf 'LIBELULA_WEBHOOK_SECRET=%s\n' "$(openssl rand -hex 32)"
+            printf 'IA_INTERNAL_KEY=%s\n' "$(openssl rand -hex 32)"
+          } >> "$GITHUB_ENV"
+      - name: Inicializar base de datos (schema + migraciones + seed)
+        run: |
+          psql -h localhost -U postgres -d fashionstore -v ON_ERROR_STOP=1 -q -f database/schema.sql
+          for f in database/migrations/*.sql; do
+            echo "== $f"
+            psql -h localhost -U postgres -d fashionstore -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+          psql -h localhost -U postgres -d fashionstore -v ON_ERROR_STOP=1 -q -f database/seed.sql
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend-nest/package-lock.json
+      - name: Build y audit de dependencias NestJS
+        working-directory: backend-nest
+        run: |
+          npm ci --legacy-peer-deps
+          npm audit --audit-level=moderate
+          npm run build
+      - name: Regression de seguridad del bootstrap (sin DB)
+        working-directory: backend-nest
+        run: npm run test:security
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Arrancar FastAPI (dependencia del proxy IA)
+        working-directory: backend-fastapi
+        run: |
+          pip install --no-cache-dir -r requirements.txt
+          python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8000/api/salud && break || sleep 1
+          done
+      - name: Arrancar NestJS y esperar salud
+        working-directory: backend-nest
+        run: |
+          node dist/main.js &
+          for i in $(seq 1 45); do
+            curl -sf http://127.0.0.1:3000/api/health && break || sleep 1
+          done
+      - name: Suites de integración
+        working-directory: backend-nest
+        run: |
+          npm run test:smoke
+          npm run test:sync-conflicts
+          npm run test:payments
+          npm run test:subscription
+          npm run test:sync
+          npm run test:reportes
+          npm run test:ia
+          npm run test:ml-persistence
+
+  backend-fastapi:
+    name: FastAPI IA (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Instalar dependencias y ejecutar pruebas
+        working-directory: backend-fastapi
+        run: |
+          pip install --no-cache-dir -r requirements-dev.txt
+          python -m pip_audit --strict --requirement requirements-dev.txt
+          python -m pytest tests/ -v
+          PYTHONPATH=. python tests/prueba_ia.py
+
+  frontend-web:
+    name: Frontend Web (build + PWA test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend-web/package-lock.json
+      - name: Audit, build y prueba offline PWA
+        working-directory: frontend-web
+        run: |
+          npm ci --legacy-peer-deps
+          npm audit --audit-level=moderate
+          npm run build
+          npm test
+
+  mobile-app:
+    name: Mobile App (typecheck + Expo export + audit gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile-app/package-lock.json
+      - name: Dependencias, typecheck y export Android
+        working-directory: mobile-app
+        run: |
+          npm ci --legacy-peer-deps --no-fund
+          npx tsc --noEmit
+          CI=1 npx expo export --platform android --output-dir dist
+      - name: Bloquear vulnerabilidades altas/críticas en mobile
+        working-directory: mobile-app
+        run: npm audit --audit-level=high
+
+  packaging:
+    name: Empaquetado (manifiesto + zip sin secretos)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Pruebas de empaquetado, secretos y preflight Azure/Neon sin nube
+        run: python3 -m unittest discover -s tools -p 'test_*.py' -v
+      - name: Generar y verificar el paquete SHA-256 sin secretos ni builds
+        run: |
+          python3 tools/paquetizar_proyecto.py
+          python3 tools/verificar_manifiesto.py --zip

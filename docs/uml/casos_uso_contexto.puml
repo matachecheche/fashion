@@ -1,0 +1,76 @@
+@startuml casos_uso_contexto
+left to right direction
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam actorStyle awesome
+skinparam usecase {
+  BackgroundColor #F5F8FF
+  BorderColor #315A86
+  ArrowColor #52677D
+}
+
+actor Cliente
+actor Cajero
+actor Encargado
+actor Administrador as Admin
+actor Proveedor
+
+rectangle "FashionStore SaaS\n(modelo de contexto; IDs CU pendientes de PDF)" {
+  usecase "Autenticarse y\ngestionar perfil" as UC_Auth
+  usecase "Explorar catálogo\ny disponibilidad" as UC_Catalogo
+  usecase "Reservar producto" as UC_Reserva
+  usecase "Comprar y consultar\npedidos" as UC_Compra
+  usecase "Confirmar pago\n(sandbox / proveedor)" as UC_Pago
+  usecase "Operar POS\ny caja" as UC_POS
+  usecase "Registrar ventas\ny devoluciones" as UC_Venta
+  usecase "Sincronizar cola\noffline" as UC_Sync
+  usecase "Resolver conflicto\nde inventario" as UC_Conflicto
+  usecase "Administrar productos,\nvariantes y stock" as UC_Producto
+  usecase "Gestionar reservas\ny atención" as UC_Atencion
+  usecase "Administrar tienda,\nusuarios y plan SaaS" as UC_SaaS
+  usecase "Consultar y exportar\nreportes" as UC_Reportes
+  usecase "Usar asistencia IA,\ntalla y vestidor AR" as UC_IA
+  usecase "Publicar propuestas\nde proveedor" as UC_Propuestas
+}
+
+Cliente --> UC_Auth
+Cliente --> UC_Catalogo
+Cliente --> UC_Reserva
+Cliente --> UC_Compra
+Cliente --> UC_Pago
+Cliente --> UC_IA
+Cajero --> UC_Auth
+Cajero --> UC_POS
+Cajero --> UC_Venta
+Cajero --> UC_Sync
+Cajero --> UC_Conflicto
+Cajero --> UC_Atencion
+Encargado --> UC_Auth
+Encargado --> UC_Producto
+Encargado --> UC_Atencion
+Encargado --> UC_Reportes
+Encargado --> UC_Conflicto
+Admin --> UC_Auth
+Admin --> UC_SaaS
+Admin --> UC_Producto
+Admin --> UC_POS
+Admin --> UC_Venta
+Admin --> UC_Sync
+Admin --> UC_Conflicto
+Admin --> UC_Reportes
+Admin --> UC_IA
+Admin --> UC_Propuestas
+Proveedor --> UC_Propuestas
+
+note bottom of UC_Pago
+  Sandbox no equivale a cobro real.
+  Pago debe validarse por firma, referencia,
+  monto y expiración antes de confirmar venta.
+end note
+note bottom of UC_Conflicto
+  `test:sync-conflicts` pasó con PostgreSQL local.
+  Móvil permite reintentar o descartar; Inventario
+  permite transferir stock antes de reintentar.
+  La prueba multi-dispositivo físico sigue pendiente.
+end note
+@enduml

@@ -1,0 +1,152 @@
+import React, { useEffect, useState } from 'react';
+import {
+  ActivityIndicator,
+  Image,
+  ScrollView,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from 'react-native';
+import { apiFetch, pullCatalogSuite } from '../api';
+import { apiAssetUrl } from '../config';
+import { useApp } from '../context';
+import { useNav } from '../navigation';
+import { Colores, Encabezado, Estilos } from '../ui';
+
+const TIPOS = ['todos', 'blusa', 'camiseta', 'cartera', 'chaqueta', 'falda', 'pantalon', 'vestido', 'zapato'] as const;
+
+export const CatalogoScreen: React.FC = () => {
+  const { tenantSlug } = useApp();
+  const nav = useNav();
+  const [productos, setProductos] = useState<any[]>([]);
+  const [q, setQ] = useState('');
+  const [tipo, setTipo] = useState<(typeof TIPOS)[number]>('todos');
+  const [cargando, setCargando] = useState(true);
+  const [offline, setOffline] = useState(false);
+
+  const cargar = async () => {
+    setCargando(true);
+    const params = new URLSearchParams();
+    if (q.trim()) params.set('q', q.trim());
+    if (tipo !== 'todos') params.set('tipo_prenda', tipo);
+    try {
+      const rows = await apiFetch(`/catalogo/productos?${params.toString()}`, { tenantSlug });
+      setProductos(Array.isArray(rows) ? rows : []);
+      setOffline(false);
+    } catch {
+      try {
+        const pull = await pullCatalogSuite(tenantSlug);
+        let rows: any[] = pull?.snapshot?.productos || [];
+        if (q.trim()) rows = rows.filter((p) => String(p.nombre).toLowerCase().includes(q.trim().toLowerCase()));
+        if (tipo !== 'todos') rows = rows.filter((p) => p.tipo_prenda === tipo);
+        setProductos(rows);
+        setOffline(true);
+      } catch {
+        setProductos([]);
+        setOffline(true);
+      }
+    } finally {
+      setCargando(false);
+    }
+  };
+
+  useEffect(() => {
+    const t = setTimeout(cargar, 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q, tipo, tenantSlug]);
+
+  return (
+    <View style={Estilos.contenedor}>
+      <View style={{ padding: 16, paddingBottom: 8 }}>
+        <Encabezado
+          titulo="👗 Catálogo"
+          subtitulo={offline ? 'Caché local (offline)' : `Tenant: /tienda/${tenantSlug}`}
+        />
+        <TextInput
+          style={Estilos.input}
+          placeholder="Buscar prenda o tela…"
+          placeholderTextColor="#94a3b8"
+          value={q}
+          onChangeText={setQ}
+          autoCapitalize="none"
+        />
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 10 }}>
+          {TIPOS.map((t) => (
+            <TouchableOpacity
+              key={t}
+              onPress={() => setTipo(t)}
+              style={{
+                paddingHorizontal: 12,
+                paddingVertical: 7,
+                borderRadius: 999,
+                marginRight: 8,
+                backgroundColor: tipo === t ? Colores.tinta : '#e2e8f0',
+              }}
+            >
+              <Text
+                style={{
+                  fontSize: 12,
+                  fontWeight: '700',
+                  color: tipo === t ? '#fff' : Colores.texto,
+                }}
+              >
+                {t.toUpperCase()}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+      </View>
+
+      {cargando ? (
+        <View style={{ padding: 32, alignItems: 'center' }}>
+          <ActivityIndicator size="large" color={Colores.acento} />
+        </View>
+      ) : (
+        <ScrollView contentContainerStyle={{ padding: 16, paddingTop: 4 }}>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}>
+            {productos.map((p) => (
+              <TouchableOpacity
+                key={p.id}
+                activeOpacity={0.85}
+                onPress={() => nav.push('Producto', { productoId: p.id })}
+                style={{
+                  width: '47%',
+                  backgroundColor: '#fff',
+                  borderRadius: 14,
+                  overflow: 'hidden',
+                  borderWidth: 1,
+                  borderColor: Colores.borde,
+                }}
+              >
+                <Image
+                  source={{ uri: apiAssetUrl(p.imagen_url) }}
+                  style={{ width: '100%', height: 150, backgroundColor: '#f1f5f9' }}
+                  resizeMode="cover"
+                />
+                <View style={{ padding: 8 }}>
+                  <Text numberOfLines={1} style={{ fontSize: 12, fontWeight: '800', color: Colores.tinta }}>
+                    {p.nombre}
+                  </Text>
+                  <Text style={{ fontSize: 11, color: Colores.suave }}>
+                    {(p.categoria_nombre || p.tipo_prenda || '').toString().toUpperCase()}
+                  </Text>
+                  <Text style={{ fontSize: 13, fontWeight: '900', color: Colores.acento, marginTop: 2 }}>
+                    Bs. {Number(p.precio_base || 0).toFixed(2)}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            ))}
+          </View>
+          {productos.length === 0 && (
+            <Text style={{ color: Colores.suave, textAlign: 'center', padding: 32 }}>
+              Sin resultados para esta búsqueda.
+            </Text>
+          )}
+        </ScrollView>
+      )}
+    </View>
+  );
+};
+export default CatalogoScreen;

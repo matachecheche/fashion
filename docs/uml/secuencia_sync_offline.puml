@@ -1,0 +1,64 @@
+@startuml secuencia_sync_offline
+hide footbox
+autonumber
+skinparam shadowing false
+skinparam responseMessageBelowArrow true
+skinparam sequence {
+  ArrowColor #315A86
+  LifeLineBorderColor #7A8EA6
+  LifeLineBackgroundColor #F5F8FF
+  ParticipantBorderColor #315A86
+  ParticipantBackgroundColor #F5F8FF
+}
+
+actor Cajero
+participant "POS / App móvil" as App
+database "Outbox local\n(SQLite)" as Local
+participant "API NestJS\n(tenant guard)" as API
+database "PostgreSQL\n(tenant transaction)" as DB
+
+Cajero -> App : registra venta en efectivo sin conexión
+App -> Local : guardar operacion_offline_id + payload
+Local --> App : persistida; estado pendiente
+
+Cajero -> App : sincronizar al recuperar red
+App -> API : POST /ventas/sincronizar-offline
+note right of API
+  La petición se valida con el tenant del token,
+  no con un tenant_id elegido por el cliente.
+end note
+API -> DB : leer clave, hash y resultado previo
+
+alt operación ya completada; mismo hash
+  DB --> API : respuesta almacenada
+  API --> App : replay idempotente; misma venta
+else operación existe; contenido distinto
+  DB --> API : hash distinto
+  API --> App : rechazo IDEMPOTENCY_PAYLOAD_MISMATCH
+else operación nueva
+  API -> DB : BEGIN; registrar operación + validar
+  API -> DB : bloquear stock y crear venta
+  alt inventario suficiente
+    DB --> API : venta confirmada + comprobante
+    API -> DB : guardar respuesta de idempotencia
+    API -> DB : COMMIT
+    API --> App : sincronizada
+    App -> Local : marcar operación completada
+  else última unidad ya vendida / stock insuficiente
+    DB --> API : conflicto de stock
+    API -> DB : guardar operación/conflicto
+    API -> DB : COMMIT conflicto
+    API --> App : conflicto; no duplicar venta
+    App -> Local : marcar requiere revisión
+  end
+end
+
+note over Cajero,DB
+  En 10-11-2026, `test:sync` y `test:sync-conflicts`
+  pasaron con NestJS y PostgreSQL 17.11 (esquema 10).
+  Replay, conflicto durable, reintento único y descarte quedaron
+  ejercitados en integración local.
+  El panel móvil permite reintentar/descarte y transferir stock.
+  No se probó competencia de varios dispositivos físicos.
+end note
+@enduml

@@ -1,0 +1,107 @@
+# =============================================================================
+# FashionStore — Orquestación local con Docker Compose
+# Levanta: PostgreSQL 17 + NestJS API (3000) + FastAPI IA (8000) + Frontend Web (5173->80)
+# Uso recomendado: iniciar-docker.bat; manual: docker compose --env-file builds/.env.docker up --build -d
+# =============================================================================
+
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: fashionstore-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: fashionstore
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Genere builds/.env.docker primero; no use valores predeterminados en el stack}
+      FS_APP_PASSWORD: ${FS_APP_PASSWORD:?Genere builds/.env.docker primero; no use valores predeterminados en el stack}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Inicialización automática (solo la primera vez, con el volumen vacío):
+      # schema + migraciones en orden + datos semilla (tenant 'legacy') y rol de app.
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./database/migrations/003_offline_sync.sql:/docker-entrypoint-initdb.d/03-offline-sync.sql:ro
+      - ./database/migrations/004_offline_reservations.sql:/docker-entrypoint-initdb.d/04-offline-reservations.sql:ro
+      - ./database/migrations/005_tenant_isolation.sql:/docker-entrypoint-initdb.d/05-tenant-isolation.sql:ro
+      - ./database/migrations/006_tenant_email_uniqueness.sql:/docker-entrypoint-initdb.d/06-tenant-email-uniqueness.sql:ro
+      - ./database/migrations/007_catalog_sync_feed.sql:/docker-entrypoint-initdb.d/07-catalog-sync-feed.sql:ro
+      - ./database/migrations/008_subscription_requests.sql:/docker-entrypoint-initdb.d/08-subscription-requests.sql:ro
+      - ./database/migrations/009_tenant_onboarding.sql:/docker-entrypoint-initdb.d/09-tenant-onboarding.sql:ro
+      - ./database/migrations/010_saas_sync_payments_ml.sql:/docker-entrypoint-initdb.d/10-saas-sync-payments-ml.sql:ro
+      - ./database/99-app-role.sh:/docker-entrypoint-initdb.d/99-app-role.sh:ro
+      - ./database/seed.sql:/docker-entrypoint-initdb.d/99-seed.sql:ro
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d fashionstore"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build: ./backend-nest
+    container_name: fashionstore-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      PORT: "3000"
+      DATABASE_URL: postgresql://fs_app:${FS_APP_PASSWORD:?Genere builds/.env.docker primero}@db:5432/fashionstore
+      DATABASE_SSL: "false"
+      JWT_SECRET: ${JWT_SECRET:?Genere builds/.env.docker primero}
+      JWT_EXPIRES_IN: 12h
+      PAGOS_MODO: sandbox
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_SIMULATOR_WEBHOOK_SECRET: ${STRIPE_SIMULATOR_WEBHOOK_SECRET:?Genere builds/.env.docker primero}
+      LIBELULA_APP_KEY: ${LIBELULA_APP_KEY:?Genere builds/.env.docker primero}
+      LIBELULA_WEBHOOK_SECRET: ${LIBELULA_WEBHOOK_SECRET:?Genere builds/.env.docker primero}
+      FASTAPI_URL: http://fastapi:8000
+      IA_INTERNAL_KEY: ${IA_INTERNAL_KEY:?Genere builds/.env.docker primero}
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:3000}
+      PUBLIC_WEB_URL: ${PUBLIC_WEB_URL:-http://localhost:5173}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+    ports:
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+
+  fastapi:
+    build: ./backend-fastapi
+    container_name: fashionstore-ia
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgresql://fs_app:${FS_APP_PASSWORD:?Genere builds/.env.docker primero}@db:5432/fashionstore
+      DATABASE_SSL: "false"
+      IA_INTERNAL_KEY: ${IA_INTERNAL_KEY:?Genere builds/.env.docker primero}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/salud', timeout=4)\" || exit 1"]
+      interval: 10s
+      timeout: 6s
+      retries: 15
+      start_period: 20s
+
+  frontend:
+    build: ./frontend-web
+    container_name: fashionstore-web
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:5173:80"
+
+volumes:
+  pgdata:

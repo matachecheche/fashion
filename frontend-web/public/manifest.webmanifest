@@ -1,0 +1,27 @@
+{
+  "name": "FashionStore SaaS — Boutique & POS Offline-First",
+  "short_name": "FashionStore",
+  "description": "Plataforma Multi-Tenant de E-Commerce de Moda, Probador Virtual AR, Reservas, POS Offline-First y Analitica con IA.",
+  "start_url": "/tienda/legacy",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "lang": "es-BO",
+  "categories": ["shopping", "business", "productivity"],
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

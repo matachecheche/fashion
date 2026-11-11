@@ -1,0 +1,137 @@
+@startuml modelo_dominio
+hide methods
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam linetype ortho
+skinparam class {
+  BackgroundColor #F5F8FF
+  BorderColor #315A86
+  ArrowColor #52677D
+}
+
+class Tenant {
+  +id: string
+  +slug: string
+  +estado: string
+}
+class Usuario {
+  +id: int
+  +tenant_id: string
+  +email: string
+  +rol: string
+}
+class Sucursal {
+  +id: int
+  +tenant_id: string
+  +codigo: string
+}
+class Producto {
+  +id: int
+  +tenant_id: string
+  +codigo: string
+  +precio_base: decimal
+}
+class Variante {
+  +id: int
+  +producto_id: int
+  +talla: string
+  +color: string
+}
+class Stock {
+  +tenant_id: string
+  +variante_id: int
+  +almacen_id: int
+  +cantidad: int
+}
+class Venta {
+  +id: int
+  +tenant_id: string
+  +numero_comprobante: string
+  +estado: string
+  +estado_pago: string
+  +total: decimal
+}
+class VentaItem {
+  +venta_id: int
+  +variante_id: int
+  +cantidad: int
+  +precio_unitario: decimal
+}
+class Pago {
+  +id: int
+  +venta_id: int
+  +referencia_externa: string
+  +monto: decimal
+  +estado: string
+}
+class OperacionOffline {
+  +tenant_id: string
+  +operacion_id: string
+  +hash_payload: sha256
+  +estado: string
+}
+class ConflictoSync {
+  +tenant_id: string
+  +operacion_id: string
+  +tipo: string
+  +estado: string
+  +resolucion: string
+}
+class SagaPago {
+  +tenant_id: string
+  +operacion_id: string
+  +paso_actual: string
+  +estado: string
+}
+class Suscripcion {
+  +tenant_id: string
+  +plan_codigo: string
+  +estado: string
+  +vence_en: timestamp
+}
+class ReporteGenerado {
+  +tenant_id: string
+  +solicitud: text
+  +resultado_json: jsonb
+}
+class ModeloML {
+  +tenant_id: string
+  +algoritmo: string
+  +version: int
+  +estado: string
+}
+class Prediccion {
+  +tenant_id: string
+  +modelo_id: int
+  +entidad_tipo: string
+  +valor_json: jsonb
+  +es_sintetico: boolean
+}
+
+Tenant "1" -- "*" Usuario : pertenece
+Tenant "1" -- "*" Sucursal : contiene
+Tenant "1" -- "*" Producto : posee
+Producto "1" -- "*" Variante : define
+Variante "1" -- "*" Stock : se almacena
+Sucursal "1" -- "*" Stock : ubica
+Usuario "0..1" -- "*" Venta : registra
+Venta "1" -- "*" VentaItem : compone
+Variante "1" -- "*" VentaItem : vendida
+Venta "1" -- "*" Pago : intenta cobrar
+Tenant "1" -- "*" OperacionOffline : aísla
+OperacionOffline "1" -- "0..1" ConflictoSync : puede generar
+Pago "1" -- "0..1" SagaPago : coordina
+Tenant "1" -- "0..1" Suscripcion : contrata
+Tenant "1" -- "*" ReporteGenerado : solicita
+Tenant "1" -- "*" ModeloML : versiona
+ModeloML "1" -- "*" Prediccion : produce
+Tenant "1" -- "*" Prediccion : aísla
+
+note bottom
+  Modelo lógico de alto nivel, no ERD exhaustivo.
+  Schema + migraciones 003–010 + seed se aplicaron en PostgreSQL 17.11;
+  meta.esquema_version = 10. Integración cubrió tenant onboarding,
+  aislamiento ML, saga y conflictos, no una auditoría de cada política RLS.
+  PK/FK y cardinalidades deben cotejarse con SQL; el dibujo no demuestra seguridad.
+end note
+@enduml

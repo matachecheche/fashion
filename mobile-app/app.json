@@ -1,0 +1,62 @@
+{
+  "expo": {
+    "name": "FashionStore",
+    "slug": "fashionstore-mobile-app",
+    "version": "2.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "fashionstore",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0f172a"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "bo.fashionstore.app"
+    },
+    "android": {
+      "package": "bo.fashionstore.app",
+      "versionCode": 20,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png",
+        "backgroundColor": "#0f172a"
+      },
+      "permissions": [
+        "CAMERA",
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "READ_MEDIA_IMAGES"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "FashionStore usa la cámara para el Vestidor Virtual AR (superposición de prendas sobre tu cuerpo)."
+        }
+      ],
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "FashionStore necesita el micrófono para dictar consultas de reportes.",
+          "speechRecognitionPermission": "FashionStore usa el reconocimiento de voz del dispositivo para transcribir consultas de reportes.",
+          "androidSpeechServicePackages": ["com.google.android.googlequicksearchbox"]
+        }
+      ],
+      "expo-sqlite",
+      "expo-secure-store",
+      [
+        "./plugins/with-api-cleartext-traffic.js"
+      ]
+    ]
+  }
+}
