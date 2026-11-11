@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { apiFetch } from '../api/client';
 import { useApp } from '../context/App';
@@ -6,6 +6,7 @@ import { formatBs } from '../lib/format';
 
 export const AsistenteFlotante: React.FC = () => {
   const { tenantSlug } = useApp();
+  const sesionId = useRef(`web-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   const [abierto, setAbierto] = useState(false);
   const [mensaje, setMensaje] = useState('');
   const [cargando, setCargando] = useState(false);
@@ -16,12 +17,13 @@ export const AsistenteFlotante: React.FC = () => {
       proveedor?: string;
       sugerencias?: any[];
       fuentes?: string[];
+      baseDatos?: boolean;
     }>
   >([
     {
       autor: 'ia',
       texto:
-        '¡Hola! Soy el Asesor Virtual IA de tu boutique. Pregúntame por combinaciones de prendas, tallas, stock o reservas.',
+        '¡Hola! Soy el Asesor Virtual IA de tu boutique. Puedo explicar FashionStore y consultar los datos autorizados de tu tienda.',
       proveedor: 'local_rules',
     },
   ]);
@@ -41,7 +43,7 @@ export const AsistenteFlotante: React.FC = () => {
       const res = await apiFetch('/ia/chat', {
         method: 'POST',
         tenantSlug,
-        body: { mensaje: textoUsuario, historial: historialChat },
+        body: { mensaje: textoUsuario, sesion_id: sesionId.current, historial: historialChat },
       });
       setHistorial((prev) => [
         ...prev,
@@ -51,6 +53,7 @@ export const AsistenteFlotante: React.FC = () => {
           proveedor: res.proveedor || res.modo_ia || 'local_rules',
           sugerencias: res.sugerencias || res.productos_sugeridos || [],
           fuentes: res.datos_consultados?.fuentes || [],
+          baseDatos: Boolean(res.datos_consultados?.base_datos),
         },
       ]);
     } catch {
@@ -58,7 +61,7 @@ export const AsistenteFlotante: React.FC = () => {
         ...prev,
         {
           autor: 'ia',
-          texto: 'Estoy operando en modo offline local. Puedes explorar el catálogo o probar prendas en el Vestidor AR.',
+          texto: 'No pude conectar con el asistente en este momento. No pude verificar datos de la tienda; revisa tu conexión e inténtalo nuevamente.',
           proveedor: 'offline_fallback',
         },
       ]);
@@ -135,6 +138,11 @@ export const AsistenteFlotante: React.FC = () => {
                         : m.proveedor === 'local_rules'
                           ? 'Local con datos de tienda'
                           : 'Asistente offline'}
+                  </div>
+                )}
+                {m.baseDatos !== undefined && (
+                  <div style={{ fontSize: '0.68rem', color: '#475569', marginTop: 3 }}>
+                    {m.baseDatos ? 'Base de datos consultada' : 'Base de datos no consultada'}
                   </div>
                 )}
                 {m.fuentes && m.fuentes.length > 0 && (

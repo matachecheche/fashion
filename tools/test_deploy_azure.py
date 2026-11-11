@@ -150,16 +150,34 @@ class AzureResourceGroupPreflightTests(unittest.TestCase):
 class NeonBootstrapTests(unittest.TestCase):
     def test_bootstrap_only_provisions_runtime_role_and_never_mutates_demo_users(self) -> None:
         sql = deploy.build_database_bootstrap_sql()
-        self.assertTrue(sql.startswith("BEGIN;\n\getenv app_password FASHIONSTORE_APP_PASSWORD"))
+        self.assertTrue(sql.startswith("BEGIN;\n\\getenv app_password FASHIONSTORE_APP_PASSWORD"))
         self.assertIn("\\gexec", sql)
         self.assertIn("ALTER ROLE fashionstore_app", sql)
         self.assertIn("CREATE ROLE fashionstore_app", sql)
+        alter_clause = sql.split("THEN 'ALTER ROLE fashionstore_app", 1)[1].split("'", 1)[0]
+        self.assertNotIn("SUPERUSER", alter_clause)
+        self.assertIn("NOSUPERUSER", sql.split("ELSE 'CREATE ROLE fashionstore_app", 1)[1])
+        self.assertIn("rolsuper", sql)
         self.assertIn("GRANT app_runtime TO fashionstore_app", sql)
         self.assertNotIn("UPDATE public.usuarios", sql)
         self.assertNotIn("SET activo = FALSE", sql)
         self.assertNotIn("FASHIONSTORE_ADMIN_PASSWORD", sql)
         self.assertNotIn("Fashion2026!", sql)
 
+
+    def test_tenant_migration_does_not_alter_superuser_attribute_on_neon(self) -> None:
+        migration = (ROOT / "database" / "migrations" / "005_tenant_isolation.sql").read_text(encoding="utf-8")
+        role_statements = [
+            line.strip() for line in migration.splitlines()
+            if line.strip().upper().startswith("ALTER ROLE APP_")
+        ]
+        self.assertEqual(len(role_statements), 2)
+        for statement in role_statements:
+            self.assertNotIn("SUPERUSER", statement.upper())
+            self.assertIn("NOLOGIN", statement.upper())
+            self.assertIn("NOBYPASSRLS", statement.upper())
+        self.assertIn("rolsuper", migration)
+        self.assertIn("rolbypassrls", migration)
 
     def test_node_pg_sql_fallback_uses_tls_and_parameterizes_role_passwords(self) -> None:
         node = shutil.which("node")
@@ -181,7 +199,7 @@ class Client {
   async query(query, params) {
     const sql = typeof query === 'string' ? query : query.text;
     record({kind:'query', sql, params: params || []});
-    if (sql.startsWith('SELECT format(')) return {rows:[{command:\"ALTER ROLE fashionstore_app WITH LOGIN PASSWORD 'quoted-by-server' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS\"}]};
+    if (sql.startsWith('SELECT format(')) return {rows:[{command:\"ALTER ROLE fashionstore_app WITH LOGIN PASSWORD 'quoted-by-server' NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS\"}]};
     if (sql.includes('rolsuper')) return {rows:[{rolsuper:false, rolbypassrls:false}]};
     if (sql.includes('SELECT valor')) return {rows:[{valor:'10'}]};
     if (sql.includes('count(*)::text AS count')) return {rows:[{count:'1'}]};
@@ -222,6 +240,8 @@ module.exports = {Client};
             role_password_query = next(item for item in queries if item["sql"].startswith("SELECT format("))
             self.assertEqual(role_password_query["params"], [env["FS_APP_PASSWORD"]])
             self.assertNotIn(env["FS_APP_PASSWORD"], role_password_query["sql"])
+            self.assertNotIn("NOSUPERUSER", role_password_query["sql"])
+            self.assertTrue(any("rolsuper" in item["sql"] for item in queries))
             self.assertFalse(any("UPDATE public.usuarios" in item["sql"] for item in queries))
             self.assertFalse(any("activo = FALSE" in item["sql"] for item in queries))
 
@@ -380,7 +400,7 @@ class AzurePayloadTests(unittest.TestCase):
 
     def test_both_llm_keys_are_container_app_secret_references(self) -> None:
         groq_key = "gsk_" + "g" * 35
-        gemini_key = "AQ.Ab8R" + "m" * 35
+        gemini_key = "AQ.Ab8RN6KzvT-" + "m" * 35
         env, secrets = deploy._llm_secret_config({"groq": groq_key, "gemini": gemini_key})
         self.assertEqual({item["name"] for item in env}, {"GROQ_API_KEY", "GEMINI_API_KEY"})
         self.assertEqual(secrets, {"groq-api-key": groq_key, "gemini-api-key": gemini_key})
@@ -388,8 +408,39 @@ class AzurePayloadTests(unittest.TestCase):
         with self.assertRaises(deploy.DeployError):
             deploy._llm_secret_config({"other": "SYNTHETIC_KEY"})
 
+    def test_accepts_new_gemini_aq_key_and_stripe_restricted_test_key(self) -> None:
+        # Synthetic keys only: validate both prefixes without contacting either provider.
+        gemini_key = "AQ.Ab8RN6KzvT-" + "x" * 28
+        stripe_key = "rk_test_" + "s" * 32
+        self.assertTrue(deploy._is_gemini_api_key(gemini_key))
+        self.assertTrue(deploy._is_stripe_test_api_key(stripe_key))
+        self.assertFalse(deploy._is_groq_api_key(stripe_key))
+        self.assertFalse(deploy._is_gemini_api_key(stripe_key))
+        env, secrets = deploy._llm_secret_config({"gemini": gemini_key})
+        self.assertEqual(secrets["gemini-api-key"], gemini_key)
+        self.assertEqual(env[0]["name"], "GEMINI_API_KEY")
+        with self.assertRaises(deploy.DeployError):
+            deploy._llm_secret_config({"groq": stripe_key})
+
+    def test_stripe_key_pasted_at_groq_prompt_does_not_abort_deploy_or_misconfigure_groq(self) -> None:
+        stripe_key = "rk_test_" + "s" * 32
+        gemini_key = "AQ.Ab8RN6KzvT-" + "x" * 28
+        with patch("builtins.input", side_effect=["s", "s"]), patch.object(
+            deploy.getpass, "getpass", side_effect=[stripe_key, gemini_key]
+        ):
+            credentials = deploy._read_optional_llm_credentials()
+        self.assertEqual(credentials, {"gemini": gemini_key})
+
+    def test_gemini_key_pasted_at_groq_prompt_is_routed_to_gemini(self) -> None:
+        gemini_key = "AQ.Ab8RN6KzvT-" + "x" * 28
+        with patch("builtins.input", side_effect=["s"]), patch.object(
+            deploy.getpass, "getpass", return_value=gemini_key
+        ):
+            credentials = deploy._read_optional_llm_credentials()
+        self.assertEqual(credentials, {"gemini": gemini_key})
+
     def test_fastapi_payload_references_optional_llm_key_as_aca_secret(self) -> None:
-        key = "AQ.Ab8R" + "m" * 35
+        key = "AQ.Ab8RN6KzvT-" + "m" * 35
         groq_key = "gsk_" + "g" * 35
         payload = deploy._fastapi_containerapp_payload(
             location="eastus",
@@ -397,7 +448,7 @@ class AzurePayloadTests(unittest.TestCase):
             image="ghcr.io/fashionstoreorg/fashionstore-ai:latest",
             app_database_url="postgresql://synthetic",
             ia_key="SYNTHETIC_INTERNAL_KEY",
-            llm_credentials={"gemini": "AQ.Ab8R" + "m" * 35, "groq": "gsk_" + "g" * 35},
+            llm_credentials={"gemini": "AQ.Ab8RN6KzvT-" + "m" * 35, "groq": "gsk_" + "g" * 35},
         )
         configuration = payload["properties"]["configuration"]
         secrets = {item["name"]: item["value"] for item in configuration["secrets"]}
@@ -422,7 +473,7 @@ class AzurePayloadTests(unittest.TestCase):
         with patch("builtins.input", side_effect=["n", "n"]):
             self.assertEqual(deploy._read_optional_llm_credentials(), {})
         groq_key = "gsk_" + "x" * 32
-        gemini_key = "AQ.Ab8R" + "y" * 32
+        gemini_key = "AQ.Ab8RN6KzvT-" + "y" * 32
         with patch("builtins.input", side_effect=["s", "s"]), patch.object(deploy.getpass, "getpass", side_effect=[groq_key, gemini_key]):
             self.assertEqual(deploy._read_optional_llm_credentials(), {"groq": groq_key, "gemini": gemini_key})
 

@@ -88,13 +88,25 @@ async function provision(client) {
       );
     }
     const passwordSql = await client.query(
-      "SELECT format('ALTER ROLE fashionstore_app WITH LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS', $1::text) AS command",
+      "SELECT format('ALTER ROLE fashionstore_app WITH LOGIN PASSWORD %L NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS', $1::text) AS command",
       [appPassword]
     );
     if (!passwordSql.rows[0] || !passwordSql.rows[0].command) {
       throw new Error('PostgreSQL no pudo preparar la actualización del rol runtime');
     }
     await client.query(passwordSql.rows[0].command);
+    // Neon no permite modificar el atributo SUPERUSER mediante ALTER ROLE al owner
+    // (no es un superusuario PostgreSQL real). CREATE ROLE deja SUPERUSER desactivado
+    // por defecto; comprobamos el estado sin intentar cambiar dicho atributo.
+    const attributes = await client.query(
+      "SELECT rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls " +
+      "FROM pg_roles WHERE rolname = 'fashionstore_app'"
+    );
+    const appRole = attributes.rows[0];
+    if (!appRole || appRole.rolsuper || appRole.rolcreatedb || appRole.rolcreaterole ||
+        appRole.rolreplication || appRole.rolbypassrls) {
+      throw new Error('fashionstore_app conserva privilegios administrativos; se cancela el despliegue');
+    }
     await client.query('GRANT app_runtime TO fashionstore_app');
     await client.query('GRANT app_readonly TO fashionstore_app');
     await client.query('GRANT USAGE ON SCHEMA public TO fashionstore_app');

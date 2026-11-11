@@ -18,7 +18,7 @@ export interface AssistantBusinessDetails {
   }>;
 }
 
-const DETAIL_LIMIT = 100;
+const DETAIL_LIMIT = 50;
 
 const PUBLIC_SOURCES = [
   'catálogo y variantes disponibles',
@@ -30,7 +30,7 @@ const PUBLIC_SOURCES = [
 const ROLE_SOURCES: Record<string, string[]> = {
   admin: [
     'ventas, pedidos e ítems', 'reservas y citas', 'pagos y devoluciones',
-    'recepciones y proveedores', 'cajas POS', 'inventario y movimientos',
+    'recepciones y proveedores', 'cajas POS', 'inventario, almacenes y movimientos',
     'cuentas por cobrar y abonos', 'propuestas de producto', 'suscripciones',
     'operaciones offline y sincronización', 'webhooks y sagas de pago (sin payloads)',
     'auditoría (sin IP ni contenido)', 'modelos ML y metadatos de predicciones',
@@ -39,7 +39,7 @@ const ROLE_SOURCES: Record<string, string[]> = {
   ],
   encargado: [
     'ventas, pedidos e ítems', 'reservas y citas', 'pagos y devoluciones',
-    'recepciones y proveedores', 'cajas POS', 'inventario y movimientos',
+    'recepciones y proveedores', 'cajas POS', 'inventario, almacenes y movimientos',
     'cuentas por cobrar y abonos', 'propuestas de producto', 'suscripciones',
     'operaciones offline y sincronización', 'webhooks y sagas de pago (sin payloads)',
     'auditoría (sin IP ni contenido)', 'modelos ML y metadatos de predicciones',
@@ -48,7 +48,7 @@ const ROLE_SOURCES: Record<string, string[]> = {
   ],
   cajero: [
     'ventas, pedidos e ítems', 'reservas y citas', 'pagos vinculados a ventas visibles',
-    'cajas POS', 'inventario disponible', 'notificaciones propias/globales',
+    'cajas POS', 'inventario y almacenes de su sucursal', 'notificaciones propias/globales',
     'operaciones offline propias',
   ],
   cliente: [
@@ -67,7 +67,8 @@ const DATASET_RULES: Array<{ key: string; pattern: RegExp; roles: string[] }> = 
   { key: 'devoluciones', pattern: /\b(devoluciones?|reembolsos?)\b/, roles: ['admin', 'encargado'] },
   { key: 'recepciones', pattern: /\b(recepciones?|compras?)\b/, roles: ['admin', 'encargado'] },
   { key: 'cajas', pattern: /\b(cajas?|turnos?|cierres?(?:\s+de\s+caja)?)\b/, roles: ['admin', 'encargado', 'cajero'] },
-  { key: 'inventario', pattern: /\b(stock|inventario|almacenes?)\b/, roles: ['admin', 'encargado', 'cajero'] },
+  { key: 'inventario', pattern: /\b(stock|inventario|existencias?|disponibilidad)\b/, roles: ['admin', 'encargado', 'cajero'] },
+  { key: 'almacenes', pattern: /\b(almacenes?|bodegas?|depositos?)\b/, roles: ['admin', 'encargado', 'cajero'] },
   { key: 'movimientos_inventario', pattern: /\b(movimientos?(?:\s+de\s+inventario)?|ajustes?)\b/, roles: ['admin', 'encargado'] },
   { key: 'proveedores', pattern: /\b(proveedores?)\b/, roles: ['admin', 'encargado'] },
   { key: 'propuestas_producto', pattern: /\b(propuestas?(?:\s+de\s+producto)?)\b/, roles: ['admin', 'encargado', 'proveedor'] },
@@ -91,6 +92,7 @@ const SECRET_PROPERTY = /(?:password|passwd|secret|api[_-]?key|authorization|acc
 const SECRET_VALUE_PATTERNS = [
   /\b(?:api[_ -]?key|secret|password|passwd|contrase(?:n|ñ)a|clave interna|authorization|bearer token)\b\s*[:=]\s*[^\s,;]+/gi,
   /\b(?:sk_live_|sk_test_|rk_live_|rk_test_|whsec_|gsk_|ghp_|github_pat_)[a-z0-9_-]{8,}\b/gi,
+  /\b(?:AIza|AQ\.)[A-Za-z0-9_.-]{12,}\b/gi,
   /\bpostgres(?:ql)?:\/\/[^\s"'<>]+/gi,
 ];
 
@@ -124,13 +126,19 @@ export function selectAssistantDetailDatasets(question: string, role: string | n
   const q = String(question || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
   const listIntent = /\b(lista|listar|muestra|muestr\w*|mostrar|detalle|detalles|registros?|ultim\w*|recient\w*|cuales|dame|dime|ver|mis?\s+(?:ventas?|pedidos?|reservas?|pagos?))\b/.test(q);
   const asksForNamedData = /\b(informacion|datos?)\b.*\b(de|del|sobre)\b/.test(q);
-  const specificStatus = /\b(estado|estatus)\b/.test(q) && /(?:#\s*\d+|\b(?:id|numero|nro)\s*\d+\b)/.test(q);
-  const asksCount = /\b(cuant\w*|cuanto|cuanta|conteo|cantidad(?:es)?|total(?:es)?|resumen|metricas?)\b/.test(q);
-  if ((!listIntent && !asksForNamedData && !specificStatus) || (asksCount && !listIntent)) return [];
-  return DATASET_RULES
-    .filter((rule) => rule.roles.includes(normalizedRole) && rule.pattern.test(q))
-    .map((rule) => rule.key)
-    .slice(0, 6);
+  const specificStatus = /\b(estado|estatus|situacion|pendiente|vencid\w*|rechazad\w*|aprob\w*|fallid\w*|critico|critica|abiert\w*|cerrad\w*|procesad\w*|sincronizad\w*)\b/.test(q);
+  const asksAnalysis = /\b(que|cual|cuales|como va|como van|como esta|como estan|que paso|que sucede|que ocurre|que pasa|por que|cuando|explica|explicame|analiza|resumen|revisa|reporte|historial|cuentame|hablame|informame|quiero saber|necesito saber|quisiera saber|me interesa saber|ultim\w*|recient\w*)\b/.test(q);
+  const asksForHelpOrTroubleshooting = /\b(ayuda|ayudame|ayudar|duda|consulta|problema|problemas|error|errores|fallo|fallos|fallido|rechazad\w*|no me aparece|no aparece|no puedo|no me deja|no funciona|no funciono|no se sincroniza|duplicad\w*|desaparecid\w*|demora|demorado|retraso|verifica|verificar|confirmar|confirmame|revisar|revisame|necesito|tengo|tuve)\b/.test(q);
+  const asksCount = /\b(cuant\w*|cuanto|cuanta|conteo|cantidad(?:es)?|total(?:es)?|metricas?)\b/.test(q);
+  const asksConcept = /\b(que es|que significa|definicion|concepto de)\b/.test(q);
+  if (asksConcept && !listIntent && !asksForNamedData && !specificStatus && !asksCount) return [];
+  const matchingDatasets = DATASET_RULES.filter(
+    (rule) => rule.roles.includes(normalizedRole) && rule.pattern.test(q),
+  );
+  // A dataset is fetched when the user asks about its state, records, history, analysis,
+  // or count. Simple conceptual questions are handled by the AI knowledge base instead.
+  if (!matchingDatasets.length || (!listIntent && !asksForNamedData && !specificStatus && !asksAnalysis && !asksCount && !asksForHelpOrTroubleshooting)) return [];
+  return matchingDatasets.map((rule) => rule.key).slice(0, 6);
 }
 
 function resultEnvelope(rows: Array<Record<string, any>>) {
@@ -170,6 +178,10 @@ export async function loadAssistantBusinessDetails(
     return true;
   });
   const userFilter = roleKey === 'cliente' ? userId : null;
+  const branchScoped = roleKey === 'cajero';
+  const branchId = Number.isSafeInteger(identity.branchId) && Number(identity.branchId) > 0
+    ? Number(identity.branchId)
+    : null;
 
   if (requested.includes('ventas')) {
     registros.ventas = await queryRows(client, `
@@ -192,13 +204,14 @@ export async function loadAssistantBusinessDetails(
           LEFT JOIN public.variantes vr ON vr.tenant_id = vi.tenant_id AND vr.id = vi.variante_id
           LEFT JOIN public.productos p ON p.tenant_id = vr.tenant_id AND p.id = vr.producto_id
          WHERE v.tenant_id = $1 AND ($2::int IS NULL OR v.usuario_id = $2)
+           AND (NOT $3::boolean OR ($4::int IS NOT NULL AND v.sucursal_id = $4))
          GROUP BY v.id, s.nombre
       )
       SELECT detalle.*, COUNT(*) OVER()::int AS total_registros
         FROM detalle
        ORDER BY creado_en DESC, id DESC
        LIMIT ${DETAIL_LIMIT}
-    `, [tenantId, userFilter]);
+    `, [tenantId, userFilter, branchScoped, branchId]);
   }
 
   if (requested.includes('reservas')) {
@@ -218,13 +231,14 @@ export async function loadAssistantBusinessDetails(
           LEFT JOIN public.variantes vr ON vr.tenant_id = dr.tenant_id AND vr.id = dr.variante_id
           LEFT JOIN public.productos p ON p.tenant_id = vr.tenant_id AND p.id = vr.producto_id
          WHERE r.tenant_id = $1 AND ($2::int IS NULL OR r.usuario_id = $2)
+           AND (NOT $3::boolean OR ($4::int IS NOT NULL AND r.sucursal_id = $4))
          GROUP BY r.id, s.nombre
       )
       SELECT detalle.*, COUNT(*) OVER()::int AS total_registros
         FROM detalle
        ORDER BY creado_en DESC, id DESC
        LIMIT ${DETAIL_LIMIT}
-    `, [tenantId, userFilter]);
+    `, [tenantId, userFilter, branchScoped, branchId]);
   }
 
   if (requested.includes('pagos')) {
@@ -236,9 +250,10 @@ export async function loadAssistantBusinessDetails(
         FROM public.pagos pg
         JOIN public.ventas v ON v.tenant_id = pg.tenant_id AND v.id = pg.venta_id
        WHERE pg.tenant_id = $1 AND ($2::int IS NULL OR v.usuario_id = $2)
+         AND (NOT $3::boolean OR ($4::int IS NOT NULL AND v.sucursal_id = $4))
        ORDER BY pg.creado_en DESC, pg.id DESC
        LIMIT ${DETAIL_LIMIT}
-    `, [tenantId, userFilter]);
+    `, [tenantId, userFilter, branchScoped, branchId]);
   }
 
   if (requested.includes('devoluciones')) {
@@ -294,9 +309,10 @@ export async function loadAssistantBusinessDetails(
         FROM public.cajas c
         JOIN public.sucursales s ON s.tenant_id = c.tenant_id AND s.id = c.sucursal_id
        WHERE c.tenant_id = $1
+         AND (NOT $2::boolean OR ($3::int IS NOT NULL AND c.sucursal_id = $3))
        ORDER BY c.abierta_en DESC, c.id DESC
        LIMIT ${DETAIL_LIMIT}
-    `, [tenantId]);
+    `, [tenantId, branchScoped, branchId]);
   }
 
   if (requested.includes('inventario')) {
@@ -314,9 +330,32 @@ export async function loadAssistantBusinessDetails(
         JOIN public.variantes vr ON vr.tenant_id = st.tenant_id AND vr.id = st.variante_id
         JOIN public.productos p ON p.tenant_id = vr.tenant_id AND p.id = vr.producto_id
        WHERE st.tenant_id = $1 AND p.activo = TRUE AND vr.activa = TRUE
+         AND (NOT $2::boolean OR ($3::int IS NOT NULL AND a.sucursal_id = $3))
        ORDER BY s.nombre, p.nombre, vr.sku
        LIMIT ${DETAIL_LIMIT}
-    `, [tenantId]);
+    `, [tenantId, branchScoped, branchId]);
+  }
+
+  if (requested.includes('almacenes')) {
+    registros.almacenes = await queryRows(client, `
+      SELECT a.id, a.codigo, a.nombre, a.es_principal, a.activo,
+             s.nombre AS sucursal,
+             COUNT(DISTINCT st.variante_id)::int AS variantes_con_stock,
+             COALESCE(SUM(st.cantidad), 0)::int AS unidades_fisicas,
+             COALESCE(SUM(st.reservado), 0)::int AS unidades_reservadas,
+             COALESCE(SUM(st.cantidad - st.reservado), 0)::int AS unidades_disponibles,
+             COUNT(*) OVER()::int AS total_registros
+        FROM public.almacenes a
+        JOIN public.sucursales s
+          ON s.tenant_id = a.tenant_id AND s.id = a.sucursal_id
+        LEFT JOIN public.stock st
+          ON st.tenant_id = a.tenant_id AND st.almacen_id = a.id
+       WHERE a.tenant_id = $1
+         AND (NOT $2::boolean OR ($3::int IS NOT NULL AND a.sucursal_id = $3))
+       GROUP BY a.id, s.nombre
+       ORDER BY s.nombre, a.nombre
+       LIMIT ${DETAIL_LIMIT}
+    `, [tenantId, branchScoped, branchId]);
   }
 
   if (requested.includes('movimientos_inventario')) {
@@ -422,18 +461,63 @@ export async function loadAssistantBusinessDetails(
 
   if (requested.includes('sincronizacion')) {
     const allTenantOps = isPrivilegedStaff;
-    registros.sincronizacion = await queryRows(client, `
-      SELECT o.id AS operacion, o.tipo, o.estado, o.creado_en, o.procesado_en,
-             c.estado AS conflicto_estado, c.tipo AS conflicto_tipo,
-             c.regla AS regla_resolucion, c.resolucion, c.resuelto_en,
-             COUNT(*) OVER()::int AS total_registros
-        FROM public.operaciones_offline o
-        LEFT JOIN public.conflictos_sync c
-          ON c.tenant_id = o.tenant_id AND c.operacion_id = o.id
-       WHERE o.tenant_id = $1 AND ($2::boolean = TRUE OR o.usuario_id = $3)
-       ORDER BY o.creado_en DESC
-       LIMIT ${DETAIL_LIMIT}
-    `, [tenantId, allTenantOps, userId]);
+    const [operations, devices, catalogFeed, idempotency] = await Promise.all([
+      queryRows(client, `
+        SELECT o.id AS operacion, o.tipo, o.estado, o.creado_en, o.procesado_en,
+               c.estado AS conflicto_estado, c.tipo AS conflicto_tipo,
+               c.regla AS regla_resolucion, c.resolucion, c.resuelto_en,
+               COUNT(*) OVER()::int AS total_registros
+          FROM public.operaciones_offline o
+          LEFT JOIN public.conflictos_sync c
+            ON c.tenant_id = o.tenant_id AND c.operacion_id = o.id
+         WHERE o.tenant_id = $1 AND ($2::boolean = TRUE OR o.usuario_id = $3)
+         ORDER BY o.creado_en DESC
+         LIMIT ${DETAIL_LIMIT}
+      `, [tenantId, allTenantOps, userId]),
+      allTenantOps
+        ? queryRows(client, `
+            SELECT d.plataforma, d.etiqueta, d.cursor_pull, d.ultima_sync_en,
+                   d.ultimo_visto_en, d.activo, d.creado_en,
+                   COUNT(*) OVER()::int AS total_registros
+              FROM public.dispositivos_sync d
+             WHERE d.tenant_id = $1
+             ORDER BY d.ultimo_visto_en DESC
+             LIMIT ${DETAIL_LIMIT}
+          `, [tenantId])
+        : Promise.resolve(resultEnvelope([])),
+      allTenantOps
+        ? queryRows(client, `
+            SELECT f.entidad, f.entidad_id, f.accion, f.actualizado_en,
+                   COUNT(*) OVER()::int AS total_registros
+              FROM public.catalogo_cambios_feed f
+             WHERE f.tenant_id = $1
+             ORDER BY f.seq DESC
+             LIMIT ${DETAIL_LIMIT}
+          `, [tenantId])
+        : Promise.resolve(resultEnvelope([])),
+      allTenantOps
+        ? queryRows(client, `
+            SELECT i.estado, i.creado_en, i.actualizado_en,
+                   COUNT(*) OVER()::int AS total_registros
+              FROM public.idempotencia i
+             WHERE i.tenant_id = $1
+             ORDER BY i.actualizado_en DESC
+             LIMIT ${DETAIL_LIMIT}
+          `, [tenantId])
+        : Promise.resolve(resultEnvelope([])),
+    ]);
+    registros.sincronizacion = {
+      total: operations.total + devices.total + catalogFeed.total + idempotency.total,
+      incluidos: operations.incluidos + devices.incluidos + catalogFeed.incluidos + idempotency.incluidos,
+      limite: DETAIL_LIMIT,
+      truncado: operations.truncado || devices.truncado || catalogFeed.truncado || idempotency.truncado,
+      filas: [
+        ...operations.filas.map((row) => ({ tipo_registro: 'operacion_offline', ...row })),
+        ...devices.filas.map((row) => ({ tipo_registro: 'dispositivo', ...row })),
+        ...catalogFeed.filas.map((row) => ({ tipo_registro: 'cambio_catalogo', ...row })),
+        ...idempotency.filas.map((row) => ({ tipo_registro: 'idempotencia', ...row })),
+      ],
+    };
   }
 
   if (requested.includes('webhooks')) {
@@ -472,7 +556,7 @@ export async function loadAssistantBusinessDetails(
 
   if (requested.includes('modelos_ml')) {
     registros.modelos_ml = await queryRows(client, `
-      SELECT m.algoritmo, m.version, m.estado, m.semilla, m.metricas, m.features_json, m.creado_en,
+      SELECT m.algoritmo, m.version, m.estado, m.semilla, m.metricas, m.creado_en,
              COUNT(*) OVER()::int AS total_registros
         FROM public.modelos_ml m
        WHERE m.tenant_id = $1

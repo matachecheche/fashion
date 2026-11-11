@@ -287,3 +287,10 @@ La prueba de integración de ML persiste artefactos y predicciones demo en Postg
 Proyecto de demostración comercial. No sustituye asesoría legal, contable ni bancaria.
 Los precios, contactos y marcas de pasarelas son de ejemplo. Si necesitas producción,
 rota todos los secretos, usa dominios propios y valida cumplimiento tributario boliviano.
+
+
+## Asistente IA conectado a datos (web y móvil)
+
+El chat de la web y el de la app móvil comparten `POST /api/ia/chat` en NestJS. Nest consulta PostgreSQL con tenant, JWT, RLS y permisos de solo lectura; envía a FastAPI únicamente un contexto reducido y saneado. FastAPI usa la guía funcional de FashionStore más ese contexto para responder: Groq y Gemini pueden trabajar simultáneamente con fallback entre proveedores. La IA no recibe credenciales ni conexión SQL, no ejecuta consultas generadas por el modelo y no modifica datos. Las fuentes incluyen catálogo, inventario/almacenes, sucursales, ventas, reservas, pagos, devoluciones, POS, proveedores, cuentas por cobrar, sincronización offline, suscripciones, webhooks y analítica autorizada por rol.
+
+Configura `GROQ_API_KEY`, `GEMINI_API_KEY` y la misma `IA_INTERNAL_KEY` en los backends, preferiblemente como secretos de Azure Container Apps. Sin claves de proveedor se mantiene el modo local para respuestas deterministas, pero no se dispone de conversación generativa completa. Consulta [docs/IA-ASISTENTE.md](docs/IA-ASISTENTE.md) para arquitectura, límites, roles y pruebas.

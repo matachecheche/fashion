@@ -15,8 +15,11 @@ from app.routers.asistente import (
     _catalogo_desde_contexto,
     _contexto_de_confianza,
     _detectar_intencion,
+    _es_solicitud_detalle,
     _is_business_question,
     _is_exact_data_question,
+    _is_troubleshooting_question,
+    _prompt_con_contexto,
     _local_reply,
 )
 
@@ -106,6 +109,34 @@ class TestAssistantContext(unittest.TestCase):
         plan_count = _local_reply("¿Cuántos planes hay?", context, [])
         self.assertIn("1 planes de suscripción", plan_count)
 
+
+    def test_operational_troubleshooting_uses_authorized_database_context(self) -> None:
+        question = "Tengo un problema con mi pedido y no me aparece el pago"
+        self.assertTrue(_is_troubleshooting_question(question))
+        self.assertTrue(_es_solicitud_detalle(question))
+        # Con proveedor generativo, el LLM recibe los registros autorizados para
+        # analizar el caso; las consultas exactas siguen usando respuestas deterministas.
+        self.assertFalse(_is_exact_data_question(question))
+        context_with_rows = {
+            **self.context,
+            "datos_detallados": {
+                "fuentes_consultadas": ["ventas", "pagos"],
+                "registros": {
+                    "ventas": {"total": 1, "truncado": False, "filas": [{
+                        "numero_comprobante": "V-001", "estado": "pendiente_pago",
+                        "estado_pago": "pendiente", "total_bs": 250, "sucursal": "Central",
+                    }]},
+                    "pagos": {"total": 1, "truncado": False, "filas": [{
+                        "numero_comprobante": "V-001", "estado": "pendiente",
+                        "monto_bs": 250, "metodo": "qr",
+                    }]},
+                },
+            },
+        }
+        fallback = _local_reply(question, context_with_rows, [])
+        self.assertIn("V-001", fallback)
+        self.assertIn("pendiente", fallback)
+
     def test_no_database_never_returns_demo_catalogue_claims(self) -> None:
         unavailable = {
             "base_datos_disponible": False,
@@ -165,6 +196,40 @@ class TestAssistantContext(unittest.TestCase):
     def test_price_of_sale_is_not_misclassified_as_sales_analytics(self) -> None:
         self.assertFalse(_is_business_question("¿Cuál es el precio de venta del vestido?"))
         self.assertTrue(_is_business_question("¿Cuántas ventas hubo este mes?"))
+
+    def test_general_store_overview_uses_tenant_metrics(self) -> None:
+        admin_context = {
+            **self.context,
+            "acceso": {"rol": "admin", "puede_consultar_metricas_comerciales": True},
+            "analitica_comercial": {
+                "ventas": {"ventas_confirmadas": 5, "ingresos_confirmados_bs": 1250, "ventas_pendientes_pago": 2},
+            },
+            "datos_operativos": {
+                "pagos": {"total": 7, "por_estado": {"aprobado": 5, "pendiente": 2}},
+                "devoluciones": {"total": 1, "por_estado": {"procesada": 1}},
+                "inventario": {"posiciones_stock_critico": 3},
+                "operaciones_offline": {"total": 4, "por_estado": {"pendiente": 1, "sincronizada": 3}},
+            },
+        }
+        self.assertTrue(_is_business_question("¿Cómo va el negocio?"))
+        self.assertTrue(_is_exact_data_question("¿Cómo está la tienda?"))
+        self.assertFalse(_is_exact_data_question("¿Qué significa un pago?"))
+        follow_up = ChatRequest(
+            mensaje="¿Y los pagos?",
+            pregunta_contexto="¿Cómo va el negocio? ¿Y los pagos?",
+        )
+        self.assertTrue(_is_exact_data_question(follow_up.pregunta_contexto or follow_up.mensaje))
+        reply = _local_reply("¿Cómo va el negocio?", admin_context, [])
+        self.assertIn("5 ventas con pago confirmado", reply)
+        self.assertIn("Bs. 1250.00", reply)
+        self.assertIn("3 posiciones", reply)
+
+    def test_prompt_contains_functional_knowledge_and_read_only_db_guards(self) -> None:
+        prompt = _prompt_con_contexto("tienda-a", self.context)
+        self.assertIn("GUÍA_FUNCIONAL", prompt)
+        self.assertIn("No escribas ni ejecutes SQL", prompt)
+        self.assertIn("No reveles datos personales", prompt)
+        self.assertIn("CONTEXTO_JSON", prompt)
 
     def test_exact_data_questions_use_deterministic_reply_but_style_can_use_llm(self) -> None:
         self.assertTrue(_is_exact_data_question("¿Cuántas blusas negras hay en stock?"))

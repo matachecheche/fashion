@@ -88,13 +88,27 @@ export class IaController {
         })
       : [];
 
+    // Para preguntas de seguimiento breves ("¿y los pendientes?", "¿cuáles vencen?"),
+    // reutiliza el último tema planteado por el usuario. El alcance sigue derivándose
+    // siempre del JWT y de TenantContext; el historial solo decide qué dataset consultar.
+    const priorUserQuestions = historial
+      .filter((item: any) => item.role === 'user')
+      .slice(-2)
+      .map((item: any) => item.content);
+    const normalizedFollowUp = mensaje.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/^[¿?¡!.,\s]+/, '').toLowerCase();
+    const shortFollowUp = mensaje.length < 90 &&
+      /^(y|tambien|entonces|cuales|cual|que hay|que pasa|y si|de esos|de esas|esos|esas|los|las|ellos|ellas)\b/.test(normalizedFollowUp);
+    const questionForContext = shortFollowUp && priorUserQuestions.length
+      ? `${priorUserQuestions.join(' ')} ${mensaje}`.slice(-500)
+      : mensaje;
+
     let contexto: Record<string, any>;
     try {
       contexto = await Db.tx(
         (client, currentTenant) => buildAssistantDataContext(
           client,
           currentTenant,
-          mensaje,
+          questionForContext,
           authenticatedUser?.rol || null,
           {
             userId: Number.isSafeInteger(Number(authenticatedUser?.sub)) ? Number(authenticatedUser?.sub) : null,
@@ -128,6 +142,7 @@ export class IaController {
         method: 'POST',
         body: {
           mensaje,
+          pregunta_contexto: questionForContext,
           sesion_id: sesionId,
           // Nunca aceptar usuario_id del body: solo proviene del JWT validado.
           usuario_id: authenticatedUser?.sub ?? null,
@@ -152,7 +167,7 @@ export class IaController {
         intencion: 'consulta_datos',
         modo_ia: 'local',
         proveedor: 'local_rules',
-        respuesta: buildAssistantLocalReply(mensaje, contexto),
+        respuesta: buildAssistantLocalReply(questionForContext, contexto),
         datos_consultados: {
           base_datos: Boolean(contexto.base_datos_disponible),
           fuentes: assistantContextSources(contexto),

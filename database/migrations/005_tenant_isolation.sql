@@ -433,9 +433,26 @@ JOIN productos p ON p.tenant_id = v.tenant_id AND p.id = v.producto_id
 WHERE s.tenant_id = public.current_tenant_id()
   AND (s.cantidad - s.reservado) <= s.stock_minimo;
 
--- 10. Permisos minimos para app_runtime y app_readonly (sin BYPASSRLS ni ownership)
-ALTER ROLE app_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
-ALTER ROLE app_readonly NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+-- 10. Permisos minimos para app_runtime y app_readonly (sin SUPERUSER ni BYPASSRLS)
+-- Neon es PostgreSQL administrado: el rol owner recibe membresía en neon_superuser,
+-- pero no tiene el atributo PostgreSQL SUPERUSER. Por eso ALTER ROLE ... NOSUPERUSER
+-- falla incluso cuando el rol de destino ya es no-superusuario. Los roles se crean
+-- sin SUPERUSER por defecto en schema.sql; aquí solo se ajustan atributos que el owner
+-- puede restringir y después se comprueba explícitamente el estado efectivo del rol.
+ALTER ROLE app_runtime NOLOGIN NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+ALTER ROLE app_readonly NOLOGIN NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+      FROM pg_roles
+     WHERE rolname IN ('app_runtime', 'app_readonly')
+       AND (rolsuper OR rolcanlogin OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls)
+  ) THEN
+    RAISE EXCEPTION 'Los roles app_runtime/app_readonly deben ser NOLOGIN, NOSUPERUSER, NOCREATEDB, NOCREATEROLE y NOBYPASSRLS';
+  END IF;
+END $$;
 
 GRANT USAGE ON SCHEMA public TO app_runtime, app_readonly, web_anon, app_user;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_runtime;

@@ -99,6 +99,76 @@ const context = {
   analitica_comercial: null,
 };
 
+console.log('=== IA context: selección de fuentes y permisos por rol ===');
+assert.deepEqual(selectAssistantDetailDatasets('¿Cómo van las devoluciones?', 'admin'), ['devoluciones']);
+assert.deepEqual(selectAssistantDetailDatasets('¿Qué almacenes tenemos?', 'admin'), ['almacenes']);
+assert.deepEqual(selectAssistantDetailDatasets('¿Qué pagos están pendientes?', 'admin'), ['pagos']);
+assert.deepEqual(selectAssistantDetailDatasets('¿Qué significa un pago?', 'admin'), []);
+assert.deepEqual(selectAssistantDetailDatasets('¿Cómo va el negocio? ¿Y los pagos?', 'admin'), ['pagos']);
+assert.deepEqual(selectAssistantDetailDatasets('Lista mis pagos', 'cliente'), ['pagos']);
+assert.deepEqual(selectAssistantDetailDatasets('Lista mis propuestas', 'proveedor'), ['propuestas_producto']);
+assert.deepEqual(selectAssistantDetailDatasets('Lista ventas de la sucursal', 'cajero'), ['ventas']);
+assert.ok(assistantAvailableBusinessSources('admin').some((source) => source.includes('almacenes')));
+assert.ok(assistantAvailableBusinessSources('cajero').some((source) => source.includes('su sucursal')));
+
+const modelQueryCalls = [];
+const modelDetails = await loadAssistantBusinessDetails(
+  { query: async (sql, params) => { modelQueryCalls.push({ sql, params }); return { rows: [] }; } },
+  'tenant-demo',
+  'Lista los modelos ML',
+  'admin',
+  { userId: 1, branchId: null, providerId: null },
+);
+assert.deepEqual(modelDetails.fuentes_consultadas, ['modelos_ml']);
+assert.equal(modelQueryCalls.length, 1);
+assert.deepEqual(modelQueryCalls[0].params, ['tenant-demo']);
+assert.doesNotMatch(modelQueryCalls[0].sql, /a\.sucursal_id/);
+
+const movementQueryCalls = [];
+const movementDetails = await loadAssistantBusinessDetails(
+  { query: async (sql, params) => { movementQueryCalls.push({ sql, params }); return { rows: [] }; } },
+  'tenant-demo',
+  'Tuve un error con los movimientos de inventario',
+  'admin',
+  { userId: 1, branchId: null, providerId: null },
+);
+assert.deepEqual(movementDetails.fuentes_consultadas, ['inventario', 'movimientos_inventario']);
+assert.equal(movementQueryCalls.length, 2);
+assert.deepEqual(movementQueryCalls[1].params, ['tenant-demo']);
+
+// Recorre el registro SQL de los datasets admitidos con un cliente falso y
+// comprueba que cada sentencia reciba exactamente sus parámetros bind.
+const datasetTopics = [
+  'ventas', 'reservas', 'pagos', 'devoluciones', 'recepciones', 'cajas',
+  'inventario', 'almacenes', 'movimientos de inventario', 'proveedores',
+  'propuestas de producto', 'cuentas por cobrar', 'abonos', 'suscripciones',
+  'operaciones offline', 'webhooks', 'sagas de pago', 'auditoria', 'modelos ML',
+  'predicciones', 'segmentos de clientes', 'reportes', 'notificaciones',
+  'interacciones de IA', 'usuarios',
+];
+for (const topic of datasetTopics) {
+  const calls = [];
+  await loadAssistantBusinessDetails(
+    { query: async (sql, params) => { calls.push({ sql, params }); return { rows: [] }; } },
+    'tenant-demo',
+    `Cuéntame sobre ${topic}`,
+    'admin',
+    { userId: 1, branchId: null, providerId: null },
+  );
+  for (const call of calls) {
+    const placeholders = [...call.sql.matchAll(/\$(\d+)/g)].map((match) => Number(match[1]));
+    const maxPlaceholder = placeholders.length ? Math.max(...placeholders) : 0;
+    assert.equal(call.params.length, maxPlaceholder, `Parámetros SQL incorrectos al consultar: ${topic}`);
+  }
+}
+
+const sanitizedCredentials = sanitizeAssistantContext({
+  descripcion: 'Texto de producto con clave AQ.Ab8RN6KzvT-12345678901234567890',
+  comentario: 'Token AIzaSyA123456789012345678901234567890',
+});
+assert.doesNotMatch(sanitizedCredentials.descripcion, /AQ\./);
+assert.doesNotMatch(sanitizedCredentials.comentario, /AIza/);
+
 console.log('=== IA context: respuestas verificables y permisos ===');
 const totalReply = buildAssistantLocalReply('¿Cuántas prendas hay?', {
   ...context,
@@ -162,6 +232,7 @@ assert.match(buildAssistantLocalReply('¿Cuántas posiciones de stock crítico h
 assert.match(buildAssistantLocalReply('¿Cuántas categorías hay?', adminContext), /4 categorías activas/);
 assert.match(buildAssistantLocalReply('¿Cuántos clientes tenemos?', adminContext), /12 clientes activos/);
 assert.match(buildAssistantLocalReply('¿Cuántos empleados hay?', adminContext), /15 usuarios activos/);
+assert.match(buildAssistantLocalReply('¿Cómo va el negocio?', adminContext), /Resumen de Boutique Demo, consultado en la base de datos/);
 
 const unavailableReply = buildAssistantLocalReply('¿Cuántos vestidos hay?', {
   base_datos_disponible: false,
@@ -169,6 +240,25 @@ const unavailableReply = buildAssistantLocalReply('¿Cuántos vestidos hay?', {
 });
 assert.match(unavailableReply, /no voy a inventar/);
 assert.doesNotMatch(unavailableReply, /Producto ficticio/);
+
+const warehouseDetailReply = buildAssistantLocalReply('¿Qué almacenes tenemos?', {
+  ...adminContext,
+  datos_detallados: {
+    fuentes_disponibles: ['almacenes'],
+    fuentes_consultadas: ['almacenes'],
+    registros: {
+      almacenes: {
+        total: 1,
+        incluidos: 1,
+        limite: 50,
+        truncado: false,
+        filas: [{ nombre: 'Depósito Central', sucursal: 'Central', unidades_disponibles: 38, unidades_fisicas: 42, variantes_con_stock: 7, es_principal: true, activo: true }],
+      },
+    },
+  },
+});
+assert.match(warehouseDetailReply, /Depósito Central/);
+assert.match(warehouseDetailReply, /38 unidades disponibles/);
 
 const suggestions = assistantSuggestedProducts(context);
 assert.equal(suggestions.length, 1);

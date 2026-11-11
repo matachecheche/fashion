@@ -528,19 +528,59 @@ def _env_secret(name: str, secret_name: str) -> dict[str, str]:
     return {"name": name, "secretRef": secret_name}
 
 
+def _is_groq_api_key(key: str) -> bool:
+    """Groq uses its own gsk_ key format; Stripe and Google keys are not interchangeable."""
+    return key.startswith("gsk_") and len(key) >= 20 and not re.search(r"REPLACE|CHANGE_ME", key, re.I)
+
+
+def _is_gemini_api_key(key: str) -> bool:
+    """Accept legacy AIza keys and Google's newer AQ.* authorization-key format."""
+    return key.startswith(("AIza", "AQ.")) and len(key) >= 20 and not re.search(r"REPLACE|CHANGE_ME", key, re.I)
+
+
+def _is_stripe_test_api_key(key: str) -> bool:
+    """Accept Stripe restricted or secret keys in test mode only."""
+    return key.startswith(("rk_test_", "sk_test_")) and len(key) >= 16 and not re.search(r"REPLACE|CHANGE_ME", key, re.I)
+
+
 def _read_optional_llm_credentials() -> dict[str, str]:
-    """Collect both optional providers; secrets are only passed to ACA, never saved locally."""
+    """Collect optional LLM keys and identify keys pasted into the wrong provider prompt."""
     print("\nIA generativa opcional. Puedes configurar Groq, Gemini, ambos o ninguno.")
-    print("Groq usa claves gsk_...; Gemini admite claves AIza... y AQ.Ab8R... nuevas.")
-    print("Las claves se guardan como secretos de Azure Container Apps, no en el ZIP ni en el archivo de estado.")
+    print("  Groq:   gsk_... (solo claves Groq).")
+    print("  Gemini: AIza... o AQ.Ab8RN6KzvT-... (claves de Google Gemini).")
+    print("  Stripe: rk_test_... o sk_test_... (se solicitará por separado después del despliegue).")
+    print("Las claves IA se guardan como secretos de Azure Container Apps, no en el ZIP ni en el archivo de estado.")
     credentials: dict[str, str] = {}
     for provider in ("groq", "gemini"):
+        # If a Gemini key was recognized in the previous prompt, do not ask for it twice.
+        if provider in credentials:
+            print("[OK] Se detectó y reservó una clave Gemini; no se volverá a solicitar.")
+            continue
         if input(f"¿Configurar {provider.capitalize()} ahora? (s/N): ").strip().lower() not in {"s", "si", "sí", "y", "yes"}:
             continue
-        key = getpass.getpass(f"Clave API {provider} (entrada oculta): ").strip()
-        valid_prefix = key.startswith("gsk_") if provider == "groq" else key.startswith(("AIza", "AQ."))
-        if len(key) < 20 or not valid_prefix:
-            raise DeployError(f"La clave {provider} no tiene un formato admitido; no se modificaron recursos.")
+        key = getpass.getpass(f"Clave API {provider} (entrada oculta; Enter para omitir): ").strip()
+        if not key:
+            print(f"[AVISO] {provider.capitalize()} queda sin configurar; el despliegue continuará.")
+            continue
+
+        if _is_stripe_test_api_key(key):
+            print("[AVISO] La clave introducida es de Stripe en modo test (rk_test_/sk_test_), no de IA.")
+            print("        No se enviará a Groq/Gemini. Podrás introducirla en el paso Stripe después del despliegue.")
+            continue
+
+        if provider == "groq" and _is_gemini_api_key(key):
+            # Recover from the common case where the user pastes their Google key at the Groq prompt.
+            credentials["gemini"] = key
+            print("[OK] Se reconoció una clave Gemini (AQ./AIza) en el campo de Groq.")
+            print("     Se reservará para Gemini; Groq quedará omitido. La clave no se mezclará entre proveedores.")
+            continue
+
+        valid = _is_groq_api_key(key) if provider == "groq" else _is_gemini_api_key(key)
+        if not valid:
+            expected = "gsk_..." if provider == "groq" else "AQ.Ab8R... o AIza..."
+            print(f"[AVISO] Formato no reconocido para {provider.capitalize()}; se omitirá este proveedor.")
+            print(f"        Formato esperado: {expected}. El despliegue continuará sin esta clave.")
+            continue
         credentials[provider] = key
     return credentials
 
@@ -551,8 +591,8 @@ def _llm_secret_config(credentials: dict[str, str] | None) -> tuple[list[dict[st
     for provider, key in (credentials or {}).items():
         if provider not in {"groq", "gemini"} or not key:
             raise DeployError("Proveedor IA no válido o clave vacía.")
-        expected = key.startswith("gsk_") if provider == "groq" else key.startswith(("AIza", "AQ."))
-        if not expected or len(key) < 20:
+        expected = _is_groq_api_key(key) if provider == "groq" else _is_gemini_api_key(key)
+        if not expected:
             raise DeployError(f"La clave {provider} no tiene el formato esperado.")
         name = f"{provider}-api-key"
         env.append(_env_secret(f"{provider.upper()}_API_KEY", name))
@@ -746,10 +786,20 @@ def build_database_bootstrap_sql() -> str:
 \getenv app_password FASHIONSTORE_APP_PASSWORD
 SELECT format(
   CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fashionstore_app')
-       THEN 'ALTER ROLE fashionstore_app WITH LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS'
+       THEN 'ALTER ROLE fashionstore_app WITH LOGIN PASSWORD %L NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS'
        ELSE 'CREATE ROLE fashionstore_app LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS'
   END, :'app_password')
 \gexec
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_roles
+     WHERE rolname = 'fashionstore_app'
+       AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls)
+  ) THEN
+    RAISE EXCEPTION 'fashionstore_app debe ser un rol de aplicación sin privilegios administrativos';
+  END IF;
+END $$;
 GRANT app_runtime TO fashionstore_app;
 GRANT app_readonly TO fashionstore_app;
 GRANT USAGE ON SCHEMA public TO fashionstore_app;
@@ -1610,8 +1660,8 @@ def maybe_enable_stripe(runner: Runner, result: dict[str, str], api_payload: dic
     input("Cuando veas el secreto whsec_... del endpoint, pulsa Enter para continuar.")
 
     stripe_key = getpass.getpass("Pega localmente una clave API Stripe test rk_test_... o sk_test_... (oculta): ").strip()
-    if not (stripe_key.startswith("rk_test_") or stripe_key.startswith("sk_test_")) or len(stripe_key) < 16:
-        raise DeployError("Se rechazó la clave: solo se aceptan claves de prueba rk_test_... o sk_test_... válidas.")
+    if not _is_stripe_test_api_key(stripe_key):
+        raise DeployError("Se rechazó la clave: solo se aceptan claves de prueba rk_test_... o sk_test_... válidas. No pegues aquí claves gsk_ ni AQ./AIza.")
     webhook_secret = getpass.getpass("Pega localmente el secreto whsec_ del endpoint (oculto): ").strip()
     if not webhook_secret.startswith("whsec_") or len(webhook_secret) < 24:
         raise DeployError("El secreto de webhook no tiene formato whsec_ válido.")

@@ -44,8 +44,8 @@ const STOP_WORDS = new Set(
 
 const COUNT_RE = /\b(cuant\w*|cantidad(?:es)?|conteo|numero(?:s)?|total(?:es)?)\b/;
 const PRICE_RE = /\b(precio|precios|cuesta|cuestan|vale|valen|costo|costos)\b/;
-const BUSINESS_RE = /\b(ventas?|vendid[oa]s?|ingresos?|recaud\w*|transacciones?|cajas?)\b/;
-const OPERATIONAL_ENTITIES_RE = /\b(clientes?|usuarios?|personal|empleados?|pedidos?|pagos?|devoluciones?|reembolsos?|recepciones?|compras?|proveedores?|almacenes?|movimientos?(?:\s+de\s+inventario)?|operaciones?\s+offline|sincronizaciones?|conflictos?|dispositivos?|idempotencia|feed|webhooks?|auditoria|cuentas?\s+por\s+cobrar|deudas?|abonos?|saldos?|propuestas?(?:\s+de\s+producto)?|suscripciones?|modelos?(?:\s+ml)?|predicciones?|notificaciones?|reportes?|interacciones?|conversaciones?(?:\s+ia)?|segmentos?(?:\s+de\s+clientes?)?|reservas?|citas?|sagas?\s+de\s+pago)\b/;
+const BUSINESS_RE = /\b(ventas?|vendid[oa]s?|ingresos?|recaud\w*|transacciones?|cajas?|negocio|rendimiento|desempeno|actividad comercial|salud de la tienda)\b/;
+const OPERATIONAL_ENTITIES_RE = /\b(clientes?|usuarios?|personal|empleados?|pedidos?|almacenes?|bodegas?|depositos?|pagos?|devoluciones?|reembolsos?|recepciones?|compras?|proveedores?|almacenes?|movimientos?(?:\s+de\s+inventario)?|operaciones?\s+offline|sincronizaciones?|conflictos?|dispositivos?|idempotencia|feed|webhooks?|auditoria|cuentas?\s+por\s+cobrar|deudas?|abonos?|saldos?|propuestas?(?:\s+de\s+producto)?|suscripciones?|modelos?(?:\s+ml)?|predicciones?|notificaciones?|reportes?|interacciones?|conversaciones?(?:\s+ia)?|segmentos?(?:\s+de\s+clientes?)?|reservas?|citas?|sagas?\s+de\s+pago)\b/;
 const STATUS_QUESTION_RE = /\b(estado|estatus|saldo|vencid\w*|rechazad\w*|pendient\w*|aprob\w*|reembolsad\w*|fallid\w*|cancelad\w*|entregad\w*|completad\w*|procesad\w*|expirad\w*|pagad\w*|sincronizad\w*|abiert\w*|cerrad\w*|critico|critica|baj\w*|resumen|reporte|metricas?)\b/;
 
 export function normalizeAssistantText(value: string): string {
@@ -974,11 +974,14 @@ export function assistantContextSources(context: Record<string, any>): string[] 
 
 function isAssistantDetailRequest(question: string): boolean {
   const q = normalizeAssistantText(question);
-  const listIntent = /\b(lista|listar|muestr\w*|mostrar|detalle|detalles|registros?|ultim\w*|recient\w*|cuales|dame|dime|ver|mis? (?:ventas?|pedidos?|reservas?|pagos?))\b/.test(q);
+  const listIntent = /\b(lista|listar|muestr\w*|mostrar|detalle|detalles|registros?|ultim\w*|recient\w*|cuales|dame|dime|ver|cuentame|hablame|explicame|informame|mis? (?:ventas?|pedidos?|reservas?|pagos?))\b/.test(q);
   const asksForNamedData = /\b(informacion|datos?)\b.*\b(de|del|sobre)\b/.test(q);
   const asksCount = /\b(cuant\w*|cuanto|cuanta|conteo|cantidad(?:es)?|total(?:es)?|resumen|metricas?)\b/.test(q);
-  const specificStatus = /\b(estado|estatus)\b/.test(q) && /(?:#\s*\d+|\b(?:id|numero|nro)\s*\d+\b)/.test(q);
-  return (listIntent || asksForNamedData || specificStatus) && (!asksCount || listIntent);
+  const asksConcept = /\b(que es|que significa|definicion|concepto de)\b/.test(q);
+  if (asksConcept && !listIntent && !asksForNamedData && !specificStatus && !asksCount) return false;
+  const specificStatus = /\b(estado|estatus|situacion|pendiente|vencid\w*|rechazad\w*|aprob\w*|fallid\w*|critico|critica|abiert\w*|cerrad\w*|procesad\w*|sincronizad\w*)\b/.test(q);
+  const asksAnalysis = /\b(que|como va|como van|como esta|como estan|que paso|que sucede|por que|cuando|cual|cuales|explica|explicame|analiza|historial|cuentame|hablame|informame|quiero saber|necesito saber)\b/.test(q);
+  return (listIntent || asksForNamedData || specificStatus || asksAnalysis) && (!asksCount || listIntent || specificStatus);
 }
 
 function assistantDetailRecordSummary(dataset: string, row: Record<string, any>): string {
@@ -1002,6 +1005,8 @@ function assistantDetailRecordSummary(dataset: string, row: Record<string, any>)
       return `recepción ${row.numero_documento || row.id}: ${row.estado || 'sin estado'}, ${money(row.total_costo_bs)}, proveedor ${row.proveedor || 'no informado'}, ${row.sucursal || 'sucursal no informada'}${items ? `; artículos: ${items}` : ''}`;
     case 'cajas':
       return `caja ${row.id}: ${row.estado || 'sin estado'}, efectivo inicial ${money(row.monto_inicial_bs)}, efectivo ventas ${money(row.ventas_efectivo_bs)}, ventas digitales ${money(row.ventas_digitales_bs)}, ${row.sucursal || 'sucursal no informada'}`;
+    case 'almacenes':
+      return `almacén ${row.nombre || row.codigo || row.id} en ${row.sucursal || 'sucursal no informada'}: ${asNumber(row.unidades_disponibles)} unidades disponibles de ${asNumber(row.unidades_fisicas)} físicas; ${asNumber(row.variantes_con_stock)} variantes con stock${row.es_principal ? '; principal' : ''}${row.activo ? '' : '; inactivo'}`;
     case 'inventario':
       return `${row.producto || 'producto'} ${row.sku || ''} (${[row.talla, row.color].filter(Boolean).join(', ')}), ${row.sucursal || ''}: ${asNumber(row.unidades_disponibles)} disponibles de ${asNumber(row.unidades_fisicas)} físicas; ${asNumber(row.unidades_reservadas)} reservadas; mínimo ${asNumber(row.stock_minimo)}`;
     case 'movimientos_inventario':
@@ -1017,6 +1022,9 @@ function assistantDetailRecordSummary(dataset: string, row: Record<string, any>)
     case 'suscripciones':
       return `${row.tipo_registro === 'solicitud' ? 'solicitud' : 'suscripción'} ${row.plan_nombre || row.plan_solicitado || row.plan_codigo || ''}: ${row.estado || 'sin estado'}${row.vence_en ? `, vence ${date(row.vence_en)}` : ''}`;
     case 'sincronizacion':
+      if (row.tipo_registro === 'dispositivo') return `dispositivo ${row.etiqueta || row.plataforma || 'sin etiqueta'} (${row.plataforma || 'plataforma no informada'}): ${row.activo ? 'activo' : 'inactivo'}, última sincronización ${date(row.ultima_sync_en) || 'sin sincronización registrada'}`;
+      if (row.tipo_registro === 'cambio_catalogo') return `cambio de catálogo ${row.entidad || 'entidad'} ${row.entidad_id || ''}: ${row.accion || 'acción no informada'}${row.actualizado_en ? `, ${date(row.actualizado_en)}` : ''}`;
+      if (row.tipo_registro === 'idempotencia') return `operación idempotente: ${row.estado || 'sin estado'}${row.actualizado_en ? `, ${date(row.actualizado_en)}` : ''}`;
       return `operación ${row.operacion || ''} (${row.tipo || ''}): ${row.estado || 'sin estado'}${row.conflicto_estado ? `, conflicto ${row.conflicto_estado}` : ''}${row.creado_en ? `, ${date(row.creado_en)}` : ''}`;
     case 'webhooks':
       return `webhook ${row.provider || ''}: ${row.procesado ? 'procesado' : 'pendiente'}, firma ${row.firma_valida ? 'válida' : 'inválida'}, ${money(row.monto_bs)}${row.recibido_en ? `, ${date(row.recibido_en)}` : ''}`;
@@ -1047,22 +1055,25 @@ function assistantDetailsReply(question: string, context: Record<string, any>): 
   if (!isAssistantDetailRequest(question)) return null;
   const details = context?.datos_detallados;
   const keys: string[] = Array.isArray(details?.fuentes_consultadas) ? details.fuentes_consultadas : [];
-  const dataset = keys.find((key) => details?.registros?.[key]);
-  if (!dataset) return null;
-  const result = details.registros[dataset];
-  const label = dataset.replace(/_/g, ' ');
-  if (!Array.isArray(result?.filas) || result.filas.length === 0) {
-    return `Consulté los registros permitidos de ${label}: no hay registros que mostrar para esta tienda/usuario.`;
-  }
-  const summaries = result.filas.slice(0, 10)
-    .map((row: Record<string, any>) => assistantDetailRecordSummary(dataset, row))
-    .filter(Boolean);
-  const total = asNumber(result.total);
-  const shown = Math.min(result.filas.length, 10);
-  const suffix = result.truncado
-    ? ` Mostré los ${shown} registros más recientes de ${total}; afina la consulta por fecha o identificador para buscar otro registro.`
-    : ` Mostré ${shown}${total ? ` de ${total}` : ''} registro${shown === 1 ? '' : 's'}.`;
-  return `${label}: ${summaries.join(' | ')}.${suffix}`;
+  const selectedKeys = keys.filter((key) => details?.registros?.[key]).slice(0, 3);
+  if (!selectedKeys.length) return null;
+  const sections = selectedKeys.map((dataset) => {
+    const result = details.registros[dataset];
+    const label = dataset.replace(/_/g, ' ');
+    if (!Array.isArray(result?.filas) || result.filas.length === 0) {
+      return `Consulté los registros permitidos de ${label}: no hay registros que mostrar para esta tienda/usuario.`;
+    }
+    const summaries = result.filas.slice(0, 6)
+      .map((row: Record<string, any>) => assistantDetailRecordSummary(dataset, row))
+      .filter(Boolean);
+    const total = asNumber(result.total);
+    const shown = Math.min(result.filas.length, 6);
+    const suffix = result.truncado
+      ? ` Se muestran ${shown} registros recientes de ${total}; puedes acotar por fecha o identificador.`
+      : ` Se muestran ${shown}${total ? ` de ${total}` : ''} registro${shown === 1 ? '' : 's'}.`;
+    return `${label}: ${summaries.join(' | ')}.${suffix}`;
+  });
+  return sections.join('\n');
 }
 
 export function buildAssistantLocalReply(question: string, context: Record<string, any>): string {
@@ -1188,6 +1199,22 @@ export function buildAssistantLocalReply(question: string, context: Record<strin
     }
     if (/\b(interacciones?|recomendaciones?\s+ia|modelos?(?:\s+ml)?|predicciones?|conversaciones?(?:\s+ia)?|segmentos?(?:\s+de\s+clientes?)?)\b/.test(q)) {
       return `IA/analítica en la base: ${asNumber(operations.interacciones?.total)} interacciones; ${asNumber(operations.recomendaciones_ia)} recomendaciones; ${asNumber(operations.conversaciones_ia?.total)} conversaciones IA (${formatCountMap(operations.conversaciones_ia?.por_proveedor)}); ${asNumber(operations.modelos_ml?.total)} modelos ML (${formatCountMap(operations.modelos_ml?.por_estado)}); ${asNumber(operations.predicciones_ml?.total)} predicciones, de las cuales ${asNumber(operations.predicciones_ml?.sinteticas)} están marcadas sintéticas; ${asNumber(operations.segmentos_cliente?.total)} segmentos de clientes. No consulté mensajes ni perfiles personales.`;
+    }
+    if (/\b(negocio|rendimiento|desempeno|actividad comercial|salud de la tienda|estado general|resumen de la tienda|como va (?:el negocio|la tienda)|como esta (?:el negocio|la tienda))\b/.test(q)) {
+      const sales = commercial.ventas || {};
+      const returns = operations.devoluciones || {};
+      const payments = operations.pagos || {};
+      const inventory = operations.inventario || {};
+      const offline = operations.operaciones_offline || {};
+      return (
+        `Resumen de ${tenantName}, consultado en la base de datos: ${asNumber(sales.ventas_confirmadas)} ventas con pago confirmado ` +
+        `por Bs. ${asNumber(sales.ingresos_confirmados_bs).toFixed(2)}; ${asNumber(sales.ventas_pendientes_pago)} pedidos pendientes de pago. ` +
+        `Hay ${asNumber(payments.total)} pagos registrados (estados: ${formatCountMap(payments.por_estado)}); ` +
+        `${asNumber(returns.total)} devoluciones registradas (estados: ${formatCountMap(returns.por_estado)}). ` +
+        `El inventario presenta ${asNumber(inventory.posiciones_stock_critico)} posiciones en o bajo el mínimo; ` +
+        `hay ${asNumber(offline.total)} operaciones offline registradas (${formatCountMap(offline.por_estado)}). ` +
+        `Es un resumen de los indicadores disponibles, no una evaluación contable completa.`
+      );
     }
     if (/\b(ventas?|pedidos?)\b/.test(q) && STATUS_QUESTION_RE.test(q)) {
       const sales = operations.ventas || {};
