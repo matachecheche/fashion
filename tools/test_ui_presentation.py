@@ -93,6 +93,14 @@ class AzureApkPipelineTests(unittest.TestCase):
         self.assertLess(declaration, first_use)
         self.assertNotIn("!specificStatus", function_source[:declaration])
 
+    def test_ghcr_preflights_nest_build_before_publishing_images(self) -> None:
+        source = (ROOT / ".github/workflows/publish-ghcr.yml").read_text(encoding="utf-8")
+        preflight = source.index("Validate NestJS TypeScript build before publishing")
+        first_publish = source.index("Build and publish FastAPI image")
+        self.assertLess(preflight, first_publish)
+        self.assertIn("npm ci --legacy-peer-deps --no-audit --no-fund", source)
+        self.assertIn("npm run build", source)
+
     def test_nest_dockerfile_uses_same_peer_dependency_resolution_as_ci(self) -> None:
         source = (ROOT / "backend-nest/Dockerfile").read_text(encoding="utf-8")
         self.assertIn("RUN npm ci --legacy-peer-deps", source)

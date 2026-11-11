@@ -27,6 +27,21 @@ jobs:
         shell: bash
         run: echo "value=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
 
+      # Build NestJS before publishing any image. This prevents a TypeScript
+      # compilation failure from leaving GHCR with a partially updated release.
+      - name: Set up Node for the NestJS preflight
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend-nest/package-lock.json
+
+      - name: Validate NestJS TypeScript build before publishing
+        working-directory: backend-nest
+        run: |
+          npm ci --legacy-peer-deps --no-audit --no-fund
+          npm run build
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
