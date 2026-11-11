@@ -58,11 +58,10 @@ class NeonConnectionTests(unittest.TestCase):
         self.assertEqual(parse_qs(parsed.query)["sslmode"], ["require"])
         self.assertEqual(parse_qs(parsed.query)["channel_binding"], ["require"])
 
-    def test_rejects_non_neon_pooled_and_non_tls_urls(self) -> None:
+    def test_rejects_non_neon_and_non_tls_urls(self) -> None:
         rejected = (
             _connection_url("mysql", "user", "pass", "db.example.test", "store", "sslmode=require"),
             _connection_url("postgresql", "user", "pass", "ep-a.us-east-1.aws.neon.tech", query="sslmode=disable"),
-            _connection_url("postgresql", "user", "pass", "ep-a-pooler.us-east-1.aws.neon.tech", query="sslmode=require"),
             _connection_url("postgresql", "user", None, "ep-a.us-east-1.aws.neon.tech", query="sslmode=require"),
             _connection_url("postgresql", "user", "", "ep-a.us-east-1.aws.neon.tech", query="sslmode=require"),
         )
@@ -71,27 +70,96 @@ class NeonConnectionTests(unittest.TestCase):
                 with self.assertRaises(deploy.DeployError):
                     deploy.parse_neon_connection_url(value)
 
-    def test_url_is_not_in_user_facing_validation_error(self) -> None:
-        secret_url = _connection_url(
-            "postgresql", "owner", "ultra-private", "ep-a-pooler.us-east-1.aws.neon.tech"
+    def test_pooled_owner_url_is_normalized_to_direct_and_runtime_is_pooled(self) -> None:
+        pooled = _connection_url(
+            "postgresql", "owner", "ultra-private", "ep-a-pooler.us-east-1.aws.neon.tech",
+            query="sslmode=require&channel_binding=require",
         )
+        owner = deploy.parse_neon_connection_url(pooled)
+        self.assertTrue(owner.input_was_pooled)
+        self.assertEqual(owner.host, "ep-a.us-east-1.aws.neon.tech")
+        self.assertNotIn("-pooler", owner.original_url)
+        runtime = deploy.build_app_database_url(owner, "fashionstore_app", "runtime")
+        self.assertIn("ep-a-pooler.", urlsplit(runtime).hostname or "")
+
+    def test_url_is_not_in_user_facing_validation_error(self) -> None:
+        secret_url = _connection_url("mysql", "owner", "ultra-private", "ep-a.us-east-1.aws.neon.tech")
         with self.assertRaises(deploy.DeployError) as error:
             deploy.parse_neon_connection_url(secret_url)
         self.assertNotIn("ultra-private", str(error.exception))
-        self.assertNotIn("ep-a-pooler", str(error.exception))
+
+
+class AzureResourceGroupPreflightTests(unittest.TestCase):
+    def test_resource_group_exists_parses_json_boolean_and_uses_subscription(self) -> None:
+        class FakeRunner:
+            def __init__(self):
+                self.calls = []
+            def run(self, args, quiet=False):
+                self.calls.append(args)
+                return 'true'
+        runner = FakeRunner()
+        self.assertTrue(deploy._resource_group_exists(runner, "subscription-id", "rg-test"))
+        self.assertIn("--subscription", runner.calls[0])
+        self.assertIn("subscription-id", runner.calls[0])
+
+    def test_resource_group_exists_falls_back_to_show_when_exists_output_is_blank(self) -> None:
+        class FakeRunner:
+            def __init__(self):
+                self.calls = []
+            def run(self, args, quiet=False):
+                self.calls.append(args)
+                if args[1:3] == ["group", "exists"]:
+                    return "WARNING: extension notice\n"
+                raise deploy.DeployError("ResourceGroupNotFound: resource group could not be found (404)")
+        runner = FakeRunner()
+        self.assertFalse(deploy._resource_group_exists(runner, "sub", "new-rg"))
+        self.assertEqual(len(runner.calls), 2)
+        self.assertIn("group", runner.calls[1])
+        self.assertIn("show", runner.calls[1])
+
+    def test_resource_group_preflight_does_not_treat_permission_errors_as_absent(self) -> None:
+        class FakeRunner:
+            def run(self, args, quiet=False):
+                if args[1:3] == ["group", "exists"]:
+                    return ""
+                raise deploy.DeployError("AuthorizationFailed: forbidden (403)")
+        with self.assertRaisesRegex(deploy.DeployError, "no pudo verificar"):
+            deploy._resource_group_exists(FakeRunner(), "sub", "new-rg")
+
+    def test_deployment_state_history_keeps_metadata_but_never_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(deploy, "BUILD_STATE", Path(temp_dir) / "state.json"), patch.object(deploy, "BUILD_HISTORY", Path(temp_dir) / "history.json"):
+                state = {
+                    "run_id": "run-001", "status": "deployed", "resource_group": "rg-demo",
+                    "web_url": "https://web.example.test", "groq_api_key": "DO_NOT_SAVE_THIS_KEY",
+                    "database_seed_report": {"tables": 48, "rows": 347},
+                }
+                deploy._save_state(state)
+                deploy._record_state_history(state)
+                deploy._record_state_history({**state, "status": "deployed", "updated_at": "2026-11-11T10:00:00+00:00"})
+                latest = json.loads((Path(temp_dir) / "state.json").read_text(encoding="utf-8"))
+                history = json.loads((Path(temp_dir) / "history.json").read_text(encoding="utf-8"))
+                encoded = json.dumps(history)
+                self.assertEqual(latest["resource_group"], "rg-demo")
+                self.assertEqual(len(history), 1)
+                self.assertIn("database_seed_report", history[0])
+                self.assertNotIn("DO_NOT_SAVE_THIS_KEY", encoded)
+                self.assertNotIn("groq_api_key", encoded)
 
 
 class NeonBootstrapTests(unittest.TestCase):
-    def test_bootstrap_uses_psql_environment_variables_and_sets_rls_context(self) -> None:
+    def test_bootstrap_only_provisions_runtime_role_and_never_mutates_demo_users(self) -> None:
         sql = deploy.build_database_bootstrap_sql()
-        self.assertTrue(sql.startswith("BEGIN;\n\\getenv app_password FASHIONSTORE_APP_PASSWORD"))
-        self.assertIn("\\getenv admin_password FASHIONSTORE_ADMIN_PASSWORD", sql)
+        self.assertTrue(sql.startswith("BEGIN;\n\getenv app_password FASHIONSTORE_APP_PASSWORD"))
         self.assertIn("\\gexec", sql)
-        self.assertIn("set_config('app.tenant_id', 'legacy', true)", sql)
-        self.assertIn("crypt(:'admin_password', gen_salt('bf', 12))", sql)
+        self.assertIn("ALTER ROLE fashionstore_app", sql)
+        self.assertIn("CREATE ROLE fashionstore_app", sql)
         self.assertIn("GRANT app_runtime TO fashionstore_app", sql)
-        self.assertNotIn("\\\\getenv", sql)
+        self.assertNotIn("UPDATE public.usuarios", sql)
+        self.assertNotIn("SET activo = FALSE", sql)
+        self.assertNotIn("FASHIONSTORE_ADMIN_PASSWORD", sql)
         self.assertNotIn("Fashion2026!", sql)
+
 
     def test_node_pg_sql_fallback_uses_tls_and_parameterizes_role_passwords(self) -> None:
         node = shutil.which("node")
@@ -132,7 +200,6 @@ module.exports = {Client};
                 "FS_BACKEND_DIR": str(backend),
                 "CLOUD_SQL_TEST_LOG": str(log_path),
                 "FS_APP_PASSWORD": "Synthetic'AppPassword0123456789ABCDE",
-                "FS_ADMIN_PASSWORD": "Synthetic'AdminPassword-2026",
             })
             script = ROOT / "tools" / "cloud_sql.js"
             result = subprocess.run(
@@ -146,7 +213,6 @@ module.exports = {Client};
             self.assertEqual(result.stdout.strip(), "PROVISION OK")
             self.assertNotIn("SYNTHETIC_OWNER_PASSWORD", result.stdout + result.stderr)
             self.assertNotIn(env["FS_APP_PASSWORD"], result.stdout + result.stderr)
-            self.assertNotIn(env["FS_ADMIN_PASSWORD"], result.stdout + result.stderr)
 
             records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
             config = next(item["config"] for item in records if item.get("kind") == "config")
@@ -155,10 +221,9 @@ module.exports = {Client};
             queries = [item for item in records if item.get("kind") == "query"]
             role_password_query = next(item for item in queries if item["sql"].startswith("SELECT format("))
             self.assertEqual(role_password_query["params"], [env["FS_APP_PASSWORD"]])
-            admin_update = next(item for item in queries if item["sql"].startswith("UPDATE public.usuarios SET password_hash"))
-            self.assertEqual(admin_update["params"], [env["FS_ADMIN_PASSWORD"]])
             self.assertNotIn(env["FS_APP_PASSWORD"], role_password_query["sql"])
-            self.assertNotIn(env["FS_ADMIN_PASSWORD"], admin_update["sql"])
+            self.assertFalse(any("UPDATE public.usuarios" in item["sql"] for item in queries))
+            self.assertFalse(any("activo = FALSE" in item["sql"] for item in queries))
 
             verified = subprocess.run(
                 [node, str(script), "verify-app"],
@@ -186,12 +251,15 @@ module.exports = {Client};
             file_queries = [item["sql"] for item in updated_records if item.get("kind") == "query"]
             self.assertIn("SELECT 1; SELECT 2;\n", file_queries)
 
-    def test_nonempty_neon_database_is_refused(self) -> None:
+    def test_neon_state_distinguishes_empty_fashionstore_and_foreign(self) -> None:
         conn = deploy.parse_neon_connection_url(
             _connection_url("postgresql", "owner", "pass", "ep-a.us-east-1.aws.neon.tech", query="sslmode=require")
         )
-        with patch.object(deploy, "_psql_value", return_value="not_empty"):
-            with self.assertRaisesRegex(deploy.DeployError, "base Neon no está vacía"):
+        for value in ("empty", "fashionstore"):
+            with patch.object(deploy, "_psql_value", return_value=value):
+                self.assertEqual(deploy._neon_empty_state(deploy.Runner(), conn), value)
+        with patch.object(deploy, "_psql_value", return_value="foreign"):
+            with self.assertRaisesRegex(deploy.DeployError, "tablas que no se reconocen"):
                 deploy._neon_empty_state(deploy.Runner(), conn)
 
     def test_all_reviewed_migrations_003_through_010_are_required(self) -> None:
@@ -216,18 +284,15 @@ module.exports = {Client};
         self.assertIn("FROM public.assistant_aprovisionamiento_estados() x", assistant)
         self.assertNotIn("FROM public.auditoria_aprovisionamiento WHERE tenant_id = $1", assistant)
 
-    def test_demo_admin_password_is_rejected(self) -> None:
-        with patch.object(
-            deploy.getpass,
-            "getpass",
-            side_effect=["Fashion2026!", "Unica-Contraseña-Larga-2026", "Unica-Contraseña-Larga-2026"],
-        ), patch("builtins.print") as printed:
-            result = deploy._read_new_secret(
-                "Nueva contraseña: ", minimum=14, forbidden=("Fashion2026!",)
-            )
+    def test_seed_demo_accounts_are_preserved_and_shared_with_local_setup(self) -> None:
+        local = (ROOT / "iniciar.py").read_text(encoding="utf-8")
+        seed = (ROOT / "database" / "seed.sql").read_text(encoding="utf-8")
+        self.assertIn("Fashion2026!", local)
+        self.assertIn("crypt('Fashion2026!'", seed)
+        self.assertEqual(len(deploy.SEED_USERS), 5)
+        self.assertEqual(deploy.SEED_PASSWORD, "Fashion2026!")
+        self.assertIn("RESTABLECER-DEMO", (ROOT / "tools" / "deploy_azure.py").read_text(encoding="utf-8"))
 
-        self.assertEqual(result, "Unica-Contraseña-Larga-2026")
-        printed.assert_any_call("No reutilices la contraseña semilla de demostración.")
 
 
 class GHCRImageTests(unittest.TestCase):
@@ -313,30 +378,34 @@ class AzurePayloadTests(unittest.TestCase):
             secret_values={"db-url": "SYNTHETIC_DB_SECRET", "jwt-secret": "SYNTHETIC_JWT_SECRET"},
         )
 
-    def test_optional_llm_key_is_a_container_app_secret_reference(self) -> None:
-        env, secrets = deploy._llm_secret_config("gemini", "SYNTHETIC_GEMINI_KEY")
-        self.assertEqual(env, [{"name": "GEMINI_API_KEY", "secretRef": "gemini-api-key"}])
-        self.assertEqual(secrets, {"gemini-api-key": "SYNTHETIC_GEMINI_KEY"})
-        self.assertEqual(deploy._llm_secret_config(None, None), ([], {}))
+    def test_both_llm_keys_are_container_app_secret_references(self) -> None:
+        groq_key = "gsk_" + "g" * 35
+        gemini_key = "AQ.Ab8R" + "m" * 35
+        env, secrets = deploy._llm_secret_config({"groq": groq_key, "gemini": gemini_key})
+        self.assertEqual({item["name"] for item in env}, {"GROQ_API_KEY", "GEMINI_API_KEY"})
+        self.assertEqual(secrets, {"groq-api-key": groq_key, "gemini-api-key": gemini_key})
+        self.assertEqual(deploy._llm_secret_config(None), ([], {}))
         with self.assertRaises(deploy.DeployError):
-            deploy._llm_secret_config("other", "SYNTHETIC_KEY")
+            deploy._llm_secret_config({"other": "SYNTHETIC_KEY"})
 
     def test_fastapi_payload_references_optional_llm_key_as_aca_secret(self) -> None:
-        key = "SYNTHETIC_GEMINI_KEY"
+        key = "AQ.Ab8R" + "m" * 35
+        groq_key = "gsk_" + "g" * 35
         payload = deploy._fastapi_containerapp_payload(
             location="eastus",
             environment_id="/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/managedEnvironments/env",
             image="ghcr.io/fashionstoreorg/fashionstore-ai:latest",
             app_database_url="postgresql://synthetic",
             ia_key="SYNTHETIC_INTERNAL_KEY",
-            llm_provider="gemini",
-            llm_api_key=key,
+            llm_credentials={"gemini": "AQ.Ab8R" + "m" * 35, "groq": "gsk_" + "g" * 35},
         )
         configuration = payload["properties"]["configuration"]
         secrets = {item["name"]: item["value"] for item in configuration["secrets"]}
         env = {item["name"]: item for item in payload["properties"]["template"]["containers"][0]["env"]}
         self.assertEqual(secrets["gemini-api-key"], key)
+        self.assertEqual(secrets["groq-api-key"], groq_key)
         self.assertEqual(env["GEMINI_API_KEY"]["secretRef"], "gemini-api-key")
+        self.assertEqual(env["GROQ_API_KEY"]["secretRef"], "groq-api-key")
         self.assertNotIn("value", env["GEMINI_API_KEY"])
         self.assertEqual(secrets["ia-key"], "SYNTHETIC_INTERNAL_KEY")
         self.assertEqual(env["IA_INTERNAL_KEY"]["secretRef"], "ia-key")
@@ -349,12 +418,13 @@ class AzurePayloadTests(unittest.TestCase):
         )
         self.assertEqual(payload["properties"]["template"]["scale"], {"minReplicas": 0, "maxReplicas": 1})
 
-    def test_optional_llm_key_prompt_is_hidden_and_can_be_skipped(self) -> None:
-        with patch("builtins.input", return_value="n"):
-            self.assertEqual(deploy._read_optional_llm_credentials(), (None, None))
-        key = "gsk_" + "x" * 32
-        with patch("builtins.input", side_effect=["s", "groq"]), patch.object(deploy.getpass, "getpass", return_value=key):
-            self.assertEqual(deploy._read_optional_llm_credentials(), ("groq", key))
+    def test_optional_llm_keys_can_skip_or_configure_both(self) -> None:
+        with patch("builtins.input", side_effect=["n", "n"]):
+            self.assertEqual(deploy._read_optional_llm_credentials(), {})
+        groq_key = "gsk_" + "x" * 32
+        gemini_key = "AQ.Ab8R" + "y" * 32
+        with patch("builtins.input", side_effect=["s", "s"]), patch.object(deploy.getpass, "getpass", side_effect=[groq_key, gemini_key]):
+            self.assertEqual(deploy._read_optional_llm_credentials(), {"groq": groq_key, "gemini": gemini_key})
 
     def test_payload_uses_public_image_without_paid_azure_registry_or_identity(self) -> None:
         payload = self.make_payload()
@@ -585,7 +655,7 @@ class LocalSafetyRegressionTests(unittest.TestCase):
         main_source = source[source.index("def main() -> int:"):]
         self.assertLess(
             main_source.index('provider_confirmation = input("¿Confirmas usar GHCR'),
-            main_source.index("_subscription(runner)"),
+            main_source.index("_subscription(runner,"),
         )
         self.assertIn("GHCR no confirmado", main_source)
 
@@ -623,7 +693,8 @@ class CloudSqlRealServerRegressionTests(unittest.TestCase):
         # format(..., $1) usa VARIADIC "any": sin cast PostgreSQL responde
         # "could not determine data type of parameter $1" y el despliegue se detiene.
         self.assertIn("NOBYPASSRLS', $1::text)", source)
-        self.assertIn("crypt($1::text, gen_salt('bf', 12))", source)
+        self.assertNotIn("UPDATE public.usuarios", source)
+        self.assertNotIn("FS_ADMIN_PASSWORD", source)
 
 
 class BatSyntaxRegressionTests(unittest.TestCase):

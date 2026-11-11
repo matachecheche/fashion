@@ -1,6 +1,6 @@
 // Helper SQL para Neon/PostgreSQL, usado solo como alternativa a psql en el despliegue.
 // Resuelve `pg` desde backend-nest/node_modules; no instala ni modifica dependencias.
-// Variables: DATABASE_URL, FS_BACKEND_DIR y, para provision, FS_APP_PASSWORD / FS_ADMIN_PASSWORD.
+// Variables: DATABASE_URL, FS_BACKEND_DIR y, para provision, FS_APP_PASSWORD.
 // Comandos: file <ruta.sql> | scalar <SQL> | provision | verify-app
 'use strict';
 
@@ -39,7 +39,7 @@ function createClient() {
 
   // Fijamos TLS y verificación del certificado explícitamente. Quitar los parámetros
   // SSL de la URL evita que pg-connection-string sobrescriba el objeto ssl explícito.
-  for (const key of ['sslmode', 'sslrootcert', 'sslcert', 'sslkey', 'sslpassword']) {
+  for (const key of ['sslmode', 'sslrootcert', 'sslcert', 'sslkey', 'sslpassword', 'channel_binding']) {
     url.searchParams.delete(key);
   }
   return new Client({
@@ -73,20 +73,20 @@ async function connectWithRetry() {
 
 async function provision(client) {
   const appPassword = process.env.FS_APP_PASSWORD || '';
-  const adminPassword = process.env.FS_ADMIN_PASSWORD || '';
   if (appPassword.length < 32) throw new Error('FS_APP_PASSWORD debe tener al menos 32 caracteres');
-  if (adminPassword && adminPassword.length < 14) throw new Error('FS_ADMIN_PASSWORD debe tener al menos 14 caracteres');
 
   await client.query('BEGIN');
   try {
-    await client.query(
-      "DO $fs$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='fashionstore_app') THEN " +
-      'CREATE ROLE fashionstore_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS; ' +
-      'END IF; END $fs$'
+    // El rol puede existir de una ejecución previa. Se actualiza de forma segura,
+    // pero jamás se actualizan ni desactivan usuarios de demostración.
+    const role = await client.query(
+      "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='fashionstore_app') AS present"
     );
-
-    // PostgreSQL utility statements no admiten parámetros bind. Pide al servidor que
-    // genere el literal SQL con format(%L); no se concatena ni escapa la clave en JS.
+    if (!role.rows[0] || !role.rows[0].present) {
+      await client.query(
+        'CREATE ROLE fashionstore_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS'
+      );
+    }
     const passwordSql = await client.query(
       "SELECT format('ALTER ROLE fashionstore_app WITH LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS', $1::text) AS command",
       [appPassword]
@@ -98,21 +98,6 @@ async function provision(client) {
     await client.query('GRANT app_runtime TO fashionstore_app');
     await client.query('GRANT app_readonly TO fashionstore_app');
     await client.query('GRANT USAGE ON SCHEMA public TO fashionstore_app');
-
-    if (adminPassword) {
-      await client.query("SELECT set_config('app.tenant_id', 'legacy', true)");
-      const result = await client.query(
-        "UPDATE public.usuarios SET password_hash = crypt($1::text, gen_salt('bf', 12)) " +
-        "WHERE tenant_id = 'legacy' AND email = 'admin@fashionstore.bo'",
-        [adminPassword]
-      );
-      if (result.rowCount !== 1) throw new Error('no se encontró admin@fashionstore.bo en el seed');
-      await client.query(
-        "UPDATE public.usuarios SET activo = FALSE " +
-        "WHERE tenant_id = 'legacy' AND email <> 'admin@fashionstore.bo'"
-      );
-    }
-
     await client.query('COMMIT');
     process.stdout.write('PROVISION OK\n');
   } catch (error) {

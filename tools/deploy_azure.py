@@ -2,8 +2,8 @@
 """Flujo asistido de FashionStore: Neon + Azure Container Apps + Stripe test.
 
 El BAT comprueba herramientas e inicia sesión Azure; este script pide la URL Neon
-localmente, prepara solo una base vacía y despliega imágenes públicas desde GHCR. No
-crea ACR ni guarda credenciales de registry en el repo o archivo de estado. Azure aún
+localmente, restaura una base vacía o una instalación FashionStore confirmada y despliega
+imágenes públicas desde GHCR. No crea ACR ni guarda credenciales en el repo/estado. Azure aún
 puede generar cargos de consumo y egress.
 """
 from __future__ import annotations
@@ -11,6 +11,8 @@ from __future__ import annotations
 import base64
 import getpass
 import json
+import hashlib
+from datetime import datetime, timezone
 import os
 import re
 import secrets
@@ -31,6 +33,15 @@ ROOT = Path(__file__).resolve().parents[1]
 CLOUD_SQL_SCRIPT = ROOT / "tools" / "cloud_sql.js"
 NEST_DIR = ROOT / "backend-nest"
 BUILD_STATE = ROOT / "builds" / "azure-test-deployment.json"
+BUILD_HISTORY = ROOT / "builds" / "azure-test-deployments.json"
+SEED_USERS = (
+    "admin@fashionstore.bo",
+    "encargado@fashionstore.bo",
+    "cajero@fashionstore.bo",
+    "proveedor@fashionstore.bo",
+    "cliente@fashionstore.bo",
+)
+SEED_PASSWORD = "Fashion2026!"
 NEON_CONSOLE = "https://console.neon.tech/"
 STRIPE_TEST_WEBHOOKS = "https://dashboard.stripe.com/test/webhooks"
 ARM_CONTAINERAPPS_API_VERSION = "2025-07-01"
@@ -65,10 +76,15 @@ class NeonConnection:
     password: str
     database: str
     query: tuple[tuple[str, str], ...]
+    input_was_pooled: bool = False
 
 
 def parse_neon_connection_url(value: str) -> NeonConnection:
-    """Validate an unpooled Neon PostgreSQL URL without echoing its credentials."""
+    """Validate a Neon PostgreSQL URL and normalize pooled owner URLs to direct URLs.
+
+    Neon connection pooling is suitable for the running application, but schema setup,
+    migrations, and seed restoration are performed with a direct connection.
+    """
     raw = str(value or "").strip()
     try:
         parsed = urllib.parse.urlsplit(raw)
@@ -80,8 +96,9 @@ def parse_neon_connection_url(value: str) -> NeonConnection:
         if not host.endswith(".neon.tech"):
             raise ValueError("host")
         first_label = host.split(".", 1)[0]
-        if first_label.endswith("-pooler"):
-            raise ValueError("pooled owner")
+        was_pooled = first_label.endswith("-pooler")
+        if was_pooled:
+            host = first_label[:-len("-pooler")] + "." + host.split(".", 1)[1]
         database = urllib.parse.unquote(parsed.path.lstrip("/"))
         if not database:
             raise ValueError("database")
@@ -93,18 +110,26 @@ def parse_neon_connection_url(value: str) -> NeonConnection:
         sslmode = params.get("sslmode", "require").lower()
         if sslmode not in {"require", "verify-ca", "verify-full"}:
             raise ValueError("ssl")
+        username = urllib.parse.unquote(parsed.username)
+        password = urllib.parse.unquote(parsed.password)
+        netloc = f"{urllib.parse.quote(username, safe='')}:{urllib.parse.quote(password, safe='')}@{host}"
+        if port != 5432:
+            netloc += f":{port}"
+        direct_url = urllib.parse.urlunsplit(("postgresql", netloc, "/" + urllib.parse.quote(database, safe=""), urllib.parse.urlencode(query), ""))
         return NeonConnection(
-            original_url=raw,
+            original_url=direct_url,
             host=host,
             port=port,
-            username=urllib.parse.unquote(parsed.username),
-            password=urllib.parse.unquote(parsed.password),
+            username=username,
+            password=password,
             database=database,
             query=query,
+            input_was_pooled=was_pooled,
         )
     except Exception as exc:
         raise DeployError(
-            "La URL debe ser PostgreSQL de Neon, conexión directa/no pooler, con usuario, contraseña, base y TLS (sslmode=require)."
+            "La URL debe ser PostgreSQL de Neon, con usuario, contraseña, base y TLS (sslmode=require). "
+            "Puedes pegar la URL pooled o directa; el asistente normaliza la pooled para preparar el esquema."
         ) from exc
 
 
@@ -340,47 +365,58 @@ def _psql_value(runner: Runner, connection: NeonConnection, sql: str) -> str:
     return "" if value is None else str(value)
 
 
-def _neon_empty_state(runner: Runner, connection: NeonConnection) -> None:
-    empty = _psql_value(
+def _neon_state(runner: Runner, connection: NeonConnection) -> str:
+    """Return empty, fashionstore, or foreign without changing the database."""
+    raw = _psql_value(
         runner,
         connection,
         """SELECT CASE
-             WHEN to_regclass('public.meta') IS NOT NULL THEN 'not_empty'
-             WHEN EXISTS (
-               SELECT 1
-                 FROM pg_catalog.pg_class c
-                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = 'public'
-                  AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
-                  AND c.relname NOT LIKE 'pg_%'
-             ) THEN 'not_empty'
-             ELSE 'empty'
-           END""",
+          WHEN NOT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public' AND c.relkind IN ('r','p','v','m','S','f')
+              AND c.relname NOT LIKE 'pg_%'
+          ) THEN 'empty'
+          WHEN (
+            SELECT count(*) FROM pg_catalog.pg_class c
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'public' AND c.relkind IN ('r','p')
+              AND c.relname IN ('meta','usuarios','productos','sucursales','almacenes')
+          ) >= 3 THEN 'fashionstore'
+          ELSE 'foreign'
+        END""",
     )
-    if empty != "empty":
-        raise DeployError(
-            "La base Neon no está vacía. Usa una base/branch NUEVA; el asistente no repite seed ni modifica datos existentes."
-        )
-    role_exists = _psql_value(
-        runner,
-        connection,
-        "SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname='fashionstore_app') THEN 'yes' ELSE 'no' END",
-    )
-    if role_exists != "no":
-        raise DeployError(
-            "Ya existe el rol global fashionstore_app en este proyecto Neon. Usa un proyecto Neon de prueba nuevo."
-        )
+    state = (raw.splitlines() or [""])[-1].strip().strip('"')
+    if state not in {"empty", "fashionstore", "foreign"}:
+        raise DeployError("No pude determinar el estado de la base Neon.")
+    return state
 
 
-def preflight_neon(runner: Runner, connection: NeonConnection) -> None:
-    """Non-mutating check before asking the user to initialize Neon."""
+def _neon_empty_state(runner: Runner, connection: NeonConnection) -> str:
+    """Backward-compatible name; now detects known FashionStore databases too."""
+    state = _neon_state(runner, connection)
+    if state == "foreign":
+        raise DeployError(
+            "La base Neon contiene tablas que no se reconocen como FashionStore; no se modificó. "
+            "Usa una base/branch dedicada o inspecciona sus tablas antes de continuar."
+        )
+    return state
+
+
+def preflight_neon(runner: Runner, connection: NeonConnection) -> str:
+    """Read-only validation; returns the state for the explicit reset confirmation."""
     if not _sql_driver():
         raise DeployError(
             "Falta un cliente SQL: instala PostgreSQL Command Line Tools (psql), "
             "o Node.js con las dependencias de backend-nest instaladas (`cd backend-nest && npm ci`)."
         )
-    _neon_empty_state(runner, connection)
-    print("Conexión Neon correcta; la base está vacía y lista para preparar.")
+    state = _neon_empty_state(runner, connection)
+    if state == "empty":
+        print("Conexión Neon correcta; la base está vacía y lista para preparar.")
+    else:
+        print("Conexión Neon correcta; se detectó una instalación FashionStore existente.")
+        print("La restauración borrará los datos actuales de esa base y volverá a cargar el seed local.")
+    return state
 
 
 def _new_hex_secret() -> str:
@@ -492,28 +528,36 @@ def _env_secret(name: str, secret_name: str) -> dict[str, str]:
     return {"name": name, "secretRef": secret_name}
 
 
-def _read_optional_llm_credentials() -> tuple[str | None, str | None]:
-    print("\nIA generativa opcional (los agregados de BD funcionan con reglas locales si se omite).")
-    print("Si la habilitas, el proveedor recibe la pregunta y el contexto comercial reducido; no se envían PII de clientes ni secretos.")
-    print("El proveedor puede tener límites o cargos propios: verifica sus condiciones; no forman parte de la cuota Azure.")
-    if input("¿Configurar ahora una clave API de Groq o Gemini? (s/N): ").strip().lower() not in {"s", "si", "sí", "y", "yes"}:
-        return None, None
-    provider = input("Proveedor [groq/gemini] (Groq): ").strip().lower() or "groq"
-    if provider not in {"groq", "gemini"}:
-        raise DeployError("Proveedor IA no válido; elige Groq o Gemini.")
-    key = getpass.getpass(f"Clave API {provider} (entrada oculta; no se imprime ni se guarda en el repo): ").strip()
-    if len(key) < 20 or (provider == "groq" and not key.startswith("gsk_")):
-        raise DeployError("La clave IA no tiene el formato esperado; se canceló sin modificar recursos.")
-    return provider, key
+def _read_optional_llm_credentials() -> dict[str, str]:
+    """Collect both optional providers; secrets are only passed to ACA, never saved locally."""
+    print("\nIA generativa opcional. Puedes configurar Groq, Gemini, ambos o ninguno.")
+    print("Groq usa claves gsk_...; Gemini admite claves AIza... y AQ.Ab8R... nuevas.")
+    print("Las claves se guardan como secretos de Azure Container Apps, no en el ZIP ni en el archivo de estado.")
+    credentials: dict[str, str] = {}
+    for provider in ("groq", "gemini"):
+        if input(f"¿Configurar {provider.capitalize()} ahora? (s/N): ").strip().lower() not in {"s", "si", "sí", "y", "yes"}:
+            continue
+        key = getpass.getpass(f"Clave API {provider} (entrada oculta): ").strip()
+        valid_prefix = key.startswith("gsk_") if provider == "groq" else key.startswith(("AIza", "AQ."))
+        if len(key) < 20 or not valid_prefix:
+            raise DeployError(f"La clave {provider} no tiene un formato admitido; no se modificaron recursos.")
+        credentials[provider] = key
+    return credentials
 
 
-def _llm_secret_config(provider: str | None, key: str | None) -> tuple[list[dict[str, str]], dict[str, str]]:
-    if not provider or not key:
-        return [], {}
-    if provider not in {"groq", "gemini"}:
-        raise DeployError("Proveedor IA no válido.")
-    name = f"{provider}-api-key"
-    return [_env_secret(name.upper().replace("-", "_"), name)], {name: key}
+def _llm_secret_config(credentials: dict[str, str] | None) -> tuple[list[dict[str, str]], dict[str, str]]:
+    env: list[dict[str, str]] = []
+    secrets: dict[str, str] = {}
+    for provider, key in (credentials or {}).items():
+        if provider not in {"groq", "gemini"} or not key:
+            raise DeployError("Proveedor IA no válido o clave vacía.")
+        expected = key.startswith("gsk_") if provider == "groq" else key.startswith(("AIza", "AQ."))
+        if not expected or len(key) < 20:
+            raise DeployError(f"La clave {provider} no tiene el formato esperado.")
+        name = f"{provider}-api-key"
+        env.append(_env_secret(f"{provider.upper()}_API_KEY", name))
+        secrets[name] = key
+    return env, secrets
 
 
 def _containerapp_payload(
@@ -569,10 +613,9 @@ def _fastapi_containerapp_payload(
     image: str,
     app_database_url: str,
     ia_key: str,
-    llm_provider: str | None = None,
-    llm_api_key: str | None = None,
+    llm_credentials: dict[str, str] | None = None,
 ) -> dict:
-    llm_env, llm_secrets = _llm_secret_config(llm_provider, llm_api_key)
+    llm_env, llm_secrets = _llm_secret_config(llm_credentials)
     return _containerapp_payload(
         location=location,
         environment_id=environment_id,
@@ -655,24 +698,113 @@ def _save_state(state: dict) -> None:
         temp.unlink(missing_ok=True)
 
 
+def _load_state() -> dict:
+    try:
+        value = json.loads(BUILD_STATE.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _record_state_history(state: dict) -> None:
+    """Keep a bounded history of non-secret deployment metadata."""
+    BUILD_HISTORY.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        history = json.loads(BUILD_HISTORY.read_text(encoding="utf-8"))
+        if not isinstance(history, list):
+            history = []
+    except (OSError, json.JSONDecodeError):
+        history = []
+    snapshot = {
+        key: state.get(key)
+        for key in (
+            "run_id", "previous_run_id", "started_at", "updated_at", "status", "resource_group_created",
+            "resource_group", "environment", "ai_app", "api_app", "web_app", "subscription_id", "subscription_name",
+            "location", "ghcr_owner", "image_urls", "web_url", "api_url", "fastapi_url", "neon_database",
+            "neon_input_was_pooled", "neon_state_before_restore", "neon_prepared", "llm_providers",
+            "database_seed_report", "stripe_test_configured", "error",
+        )
+        if key in state
+    }
+    run_id = snapshot.get("run_id")
+    history = [item for item in history if not isinstance(item, dict) or item.get("run_id") != run_id]
+    history.append(snapshot)
+    temp = _make_private_temp_json(history[-50:])
+    try:
+        temp.replace(BUILD_HISTORY)
+        try:
+            os.chmod(BUILD_HISTORY, 0o600)
+        except OSError:
+            pass
+    finally:
+        temp.unlink(missing_ok=True)
+
+
 def build_database_bootstrap_sql() -> str:
-    """Return client-side psql script; passwords arrive only via process environment."""
+    """Create/update only the restricted runtime role; NEVER mutate demo users."""
     return r"""BEGIN;
 \getenv app_password FASHIONSTORE_APP_PASSWORD
-SELECT format('CREATE ROLE fashionstore_app LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS', :'app_password')
+SELECT format(
+  CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'fashionstore_app')
+       THEN 'ALTER ROLE fashionstore_app WITH LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS'
+       ELSE 'CREATE ROLE fashionstore_app LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS'
+  END, :'app_password')
 \gexec
 GRANT app_runtime TO fashionstore_app;
 GRANT app_readonly TO fashionstore_app;
 GRANT USAGE ON SCHEMA public TO fashionstore_app;
-SELECT set_config('app.tenant_id', 'legacy', true);
-\getenv admin_password FASHIONSTORE_ADMIN_PASSWORD
-UPDATE public.usuarios
-   SET password_hash = crypt(:'admin_password', gen_salt('bf', 12))
- WHERE tenant_id = 'legacy' AND email = 'admin@fashionstore.bo';
-UPDATE public.usuarios SET activo = FALSE
- WHERE tenant_id = 'legacy' AND email <> 'admin@fashionstore.bo';
 COMMIT;
 """
+
+
+WIPE_PUBLIC_SQL = """DROP SCHEMA public CASCADE;
+CREATE SCHEMA public AUTHORIZATION CURRENT_USER;
+GRANT USAGE ON SCHEMA public TO PUBLIC;"""
+
+
+def _parse_fingerprint(raw: str) -> dict[str, int]:
+    line = (str(raw or "").splitlines() or [""])[-1].strip().strip('"')
+    counts: dict[str, int] = {}
+    for item in filter(None, line.split(",")):
+        name, _, value = item.rpartition("=")
+        if name and value.lstrip("-").isdigit():
+            counts[name] = int(value)
+    return counts
+
+
+FINGERPRINT_SQL = """SELECT COALESCE(string_agg(relname || '=' || cnt, ',' ORDER BY relname), '')
+FROM (
+  SELECT c.relname,
+         (xpath('/row/c/text()', query_to_xml(
+            format('SELECT count(*) AS c FROM public.%I', c.relname), false, true, '')))[1]::text AS cnt
+    FROM pg_catalog.pg_class c
+   WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r','p')
+) t"""
+
+
+def verify_restored_data(runner: Runner, owner: NeonConnection) -> dict:
+    """Verify all five active demo logins and collect per-table row counts."""
+    emails = ", ".join("'" + email + "'" for email in SEED_USERS)
+    users_sql = (
+        "SELECT count(*)::text FROM public.usuarios "
+        "WHERE tenant_id='legacy' AND activo=TRUE AND email IN (" + emails + ") "
+        f"AND password_hash = crypt('{SEED_PASSWORD}', password_hash)"
+    )
+    users_raw = _psql_value(runner, owner, users_sql)
+    users_ok = (users_raw.splitlines() or [""])[-1].strip().strip('"')
+    if users_ok != str(len(SEED_USERS)):
+        raise DeployError(
+            f"Los usuarios de prueba no coinciden con el seed local: válidos {users_ok or 0} de {len(SEED_USERS)}."
+        )
+    counts = _parse_fingerprint(_psql_value(runner, owner, FINGERPRINT_SQL))
+    if not counts:
+        raise DeployError("No pude leer el conteo de tablas tras restaurar la base.")
+    return {
+        "tables": len(counts),
+        "rows": sum(counts.values()),
+        "demo_users_active_and_password_verified": int(users_ok),
+        "table_row_counts": counts,
+    }
 
 
 def _migration_files_for_bootstrap(directory: Path) -> list[Path]:
@@ -693,15 +825,30 @@ def _migration_files_for_bootstrap(directory: Path) -> list[Path]:
     return files
 
 
-def prepare_neon_database(runner: Runner, owner: NeonConnection, admin_password: str) -> tuple[str, str]:
-    """Apply schema/migrations/seed on a checked-empty DB and verify runtime login."""
-    _neon_empty_state(runner, owner)  # Recheck immediately before any write.
+def prepare_neon_database(
+    runner: Runner,
+    owner: NeonConnection,
+    *,
+    reset_existing: bool = False,
+    app_password: str | None = None,
+) -> tuple[str, str, dict]:
+    """Restore the exact local schema + migrations + seed; existing FashionStore needs consent."""
+    current_state = _neon_state(runner, owner)
+    if current_state == "foreign":
+        raise DeployError("Se detectaron tablas ajenas a FashionStore; no se borró ni modificó la base.")
+    if current_state == "fashionstore":
+        if not reset_existing:
+            raise DeployError("La base Neon ya contiene FashionStore; confirma RESTABLECER-DEMO para restaurarla.")
+        print("Restaurando FashionStore: se eliminan las tablas/vistas de public y se aplica el seed local completo ...")
+        if shutil.which("psql"):
+            _psql(runner, ["--quiet", "--command", WIPE_PUBLIC_SQL], owner)
+        else:
+            _cloud_sql(runner, owner, "scalar", WIPE_PUBLIC_SQL)
     migration_files = _migration_files_for_bootstrap(ROOT / "database" / "migrations")
     files = [ROOT / "database" / "schema.sql", *migration_files, ROOT / "database" / "seed.sql"]
     for sql_file in files:
         if not sql_file.is_file():
             raise DeployError(f"Falta el archivo SQL requerido: {sql_file.relative_to(ROOT)}")
-
     for sql_file in files:
         print(f"Aplicando {sql_file.relative_to(ROOT)} ...")
         if shutil.which("psql"):
@@ -709,69 +856,60 @@ def prepare_neon_database(runner: Runner, owner: NeonConnection, admin_password:
         else:
             _cloud_sql(runner, owner, "file", str(sql_file))
 
-    app_password = _new_hex_secret()
-    runner.add_sensitive(owner.original_url, owner.password, app_password, admin_password)
+    runtime_password = app_password or _new_hex_secret()
+    runner.add_sensitive(owner.original_url, owner.password, runtime_password)
     if shutil.which("psql"):
-        bootstrap_sql = build_database_bootstrap_sql()
-        sql_path = _write_private_temp_text(bootstrap_sql, ".sql")
+        sql_path = _write_private_temp_text(build_database_bootstrap_sql(), ".sql")
         try:
             _psql(
                 runner,
                 ["--quiet", "--file", str(sql_path)],
                 owner,
-                extra_env={
-                    "FASHIONSTORE_APP_PASSWORD": app_password,
-                    "FASHIONSTORE_ADMIN_PASSWORD": admin_password,
-                },
+                extra_env={"FASHIONSTORE_APP_PASSWORD": runtime_password},
             )
         finally:
             sql_path.unlink(missing_ok=True)
     else:
-        _cloud_sql(
-            runner,
-            owner,
-            "provision",
-            extra_env={
-                "FS_APP_PASSWORD": app_password,
-                "FS_ADMIN_PASSWORD": admin_password,
-            },
-        )
+        _cloud_sql(runner, owner, "provision", extra_env={"FS_APP_PASSWORD": runtime_password})
 
-    app_url = build_app_database_url(owner, "fashionstore_app", app_password)
-    runner.add_sensitive(app_url)
+    report = verify_restored_data(runner, owner)
+    runtime_url = build_app_database_url(owner, "fashionstore_app", runtime_password)
+    runner.add_sensitive(runtime_url)
     runtime_connection = replace(
         owner,
-        original_url=app_url,
+        original_url=runtime_url,
         host=_pooled_host(owner.host),
         username="fashionstore_app",
-        password=app_password,
+        password=runtime_password,
     )
     if shutil.which("psql"):
         access_check = _psql(
             runner,
             [
-                "--quiet",
-                "--tuples-only",
-                "--no-align",
-                "--command",
+                "--quiet", "--tuples-only", "--no-align", "--command",
                 "BEGIN; SET LOCAL ROLE app_readonly; "
                 "SELECT set_config('app.tenant_id', 'legacy', true); "
                 "SELECT count(*)::text FROM public.usuarios "
-                "WHERE tenant_id='legacy' AND email='admin@fashionstore.bo'; COMMIT;",
+                "WHERE tenant_id='legacy' AND activo=TRUE; COMMIT;",
             ],
             runtime_connection,
         )
         rows = [line.strip() for line in access_check.splitlines() if line.strip()]
-        if not rows or rows[-1] != "1":
-            raise DeployError("El rol runtime no pudo validar acceso de lectura/RLS a la cuenta semilla.")
+        if not rows or not rows[-1].isdigit() or int(rows[-1]) < len(SEED_USERS):
+            raise DeployError("El rol runtime no pudo validar acceso de lectura/RLS a los usuarios semilla.")
     else:
         verification = _cloud_sql(runner, runtime_connection, "verify-app")
         if not verification.startswith("VERIFY OK esquema_version=") or " cuenta_admin=1" not in verification:
             raise DeployError("El rol runtime no pudo validar esquema ni acceso de lectura/RLS a la cuenta semilla.")
-    return app_url, app_password
+    report["seed_files_sha256"] = {
+        file.relative_to(ROOT).as_posix(): hashlib.sha256(file.read_bytes()).hexdigest()
+        for file in files
+    }
+    report["seed_password_policy"] = "same_as_local_demo_seed"
+    return runtime_url, runtime_password, report
 
 
-def _subscription(runner: Runner) -> tuple[str, str]:
+def _subscription(runner: Runner, preferred_id: str | None = None) -> tuple[str, str]:
     accounts = runner.az_json(["account", "list"])
     if not isinstance(accounts, list):
         raise DeployError("Azure CLI no devolvió la lista de suscripciones esperada.")
@@ -780,10 +918,13 @@ def _subscription(runner: Runner) -> tuple[str, str]:
         raise DeployError("No hay una suscripción Azure habilitada. Inicia sesión con az login y verifica el acceso.")
 
     print("\nSuscripciones Azure disponibles:")
+    preferred_index = next((i for i, a in enumerate(enabled, 1) if str(a.get("id", "")) == str(preferred_id or "")), None)
     for index, account in enumerate(enabled, 1):
-        print(f"  {index}) {account.get('name', '(sin nombre)')} [{account.get('id', '')}]")
+        marker = " (última utilizada)" if index == preferred_index else ""
+        print(f"  {index}) {account.get('name', '(sin nombre)')} [{account.get('id', '')}]{marker}")
+    default_index = preferred_index or 1
     while True:
-        answer = input(f"Elige una suscripción [1-{len(enabled)}]: ").strip()
+        answer = input(f"Elige una suscripción [1-{len(enabled)}] [{default_index}]: ").strip() or str(default_index)
         if answer.isdigit() and 1 <= int(answer) <= len(enabled):
             selected = enabled[int(answer) - 1]
             subscription_id = str(selected.get("id", ""))
@@ -991,10 +1132,56 @@ def _validate_location(runner: Runner, location: str) -> None:
 
 
 def _parse_bool_output(output: str) -> str:
-    """Devuelve 'true' o 'false' ignorando avisos que Azure CLI mezcla en la salida."""
-    values = [line.strip().strip('"').lower() for line in str(output or "").splitlines()]
+    """Accept bare TSV, JSON booleans, and harmless Azure CLI warning wrappers."""
+    raw = str(output or "").strip()
+    try:
+        parsed = json.loads(raw)
+        if parsed is True:
+            return "true"
+        if parsed is False:
+            return "false"
+        if isinstance(parsed, str) and parsed.strip().lower() in {"true", "false"}:
+            return parsed.strip().lower()
+    except json.JSONDecodeError:
+        pass
+    values = [line.strip().strip('"').lower() for line in raw.splitlines()]
     values = [value for value in values if value in {"true", "false"}]
     return values[-1] if values else ""
+
+
+def _resource_group_exists(runner: Runner, subscription_id: str, resource_group: str) -> bool:
+    """Use az group exists, then group show as a fallback for broken TSV/JSON output."""
+    command = [
+        "az", "group", "exists", "--name", resource_group,
+        "--subscription", subscription_id, "--only-show-errors", "--output", "json",
+    ]
+    first_error = ""
+    try:
+        raw = runner.run(command, quiet=True)
+    except DeployError as exc:
+        raw = ""
+        first_error = str(exc)
+    parsed = _parse_bool_output(raw)
+    if parsed == "true":
+        return True
+    if parsed == "false":
+        return False
+
+    try:
+        shown = runner.run(
+            ["az", "group", "show", "--name", resource_group, "--subscription", subscription_id,
+             "--only-show-errors", "--query", "id", "--output", "tsv"],
+            quiet=True,
+        )
+        return bool(_tsv_value(shown))
+    except DeployError as exc:
+        detail = str(exc).lower()
+        if any(marker in detail for marker in ("resourcegroupnotfound", "resource group not found", "could not be found", "404", "notfound")):
+            return False
+        raise DeployError(
+            "Azure no pudo verificar si el Resource Group existe. Comprueba permisos Reader sobre la suscripción, "
+            "el tenant activo y la conectividad de Azure CLI. Detalle: " + (str(exc) + " " + first_error)[-1500:]
+        ) from exc
 
 
 def _check_azure_preflight(
@@ -1009,19 +1196,10 @@ def _check_azure_preflight(
     if str(active.get("id", "")) != subscription_id:
         raise DeployError("La suscripción activa cambió; vuelve a iniciar el BAT y selecciona la correcta.")
     _validate_location(runner, location)
-
-    raw_exists = runner.run(
-        ["az", "group", "exists", "--name", names["resource_group"], "--output", "tsv"],
-        quiet=True,
-    )
-    exists = _parse_bool_output(raw_exists)
-    if exists == "true":
-        raise DeployError(f"El Resource Group generado ya existe ({names['resource_group']}); no se modifican recursos existentes.")
-    if exists != "false":
-        detail = raw_exists.strip()[-1500:] or "(sin salida)"
+    if _resource_group_exists(runner, subscription_id, names["resource_group"]):
         raise DeployError(
-            "No se pudo confirmar que el Resource Group generado no exista. "
-            f"Salida de az group exists:\n{detail}"
+            f"El Resource Group generado ya existe ({names['resource_group']}); no se modifican recursos existentes. "
+            "Vuelve a iniciar para generar otro nombre."
         )
 
 
@@ -1147,13 +1325,25 @@ def _create_azure(
     ghcr_owner: str,
     image_urls: dict[str, str],
     state: dict,
-    llm_provider: str | None = None,
-    llm_api_key: str | None = None,
+    llm_credentials: dict[str, str] | None = None,
 ) -> tuple[dict[str, str], dict]:
     """Create only scale-to-zero ACA resources and pull public images from GHCR."""
     resource_group = names["resource_group"]
     _ensure_providers_registered(runner)
     _check_azure_preflight(runner, subscription_id, location, names)
+    state.update({
+        "status": "azure_creation_pending",
+        "subscription_id": subscription_id,
+        "subscription_name": subscription_name,
+        "location": location,
+        **names,
+        "ghcr_owner": ghcr_owner,
+        "image_urls": image_urls,
+        "neon_prepared": True,
+        "resource_group_created": False,
+    })
+    state["updated_at"] = datetime.now(timezone.utc).isoformat()
+    _resource_group_state(state)
 
     print(f"Creando Azure Container Apps Express (Consumption, escala a cero) en {subscription_name}, región {location}, RG {resource_group} ...")
     runner.az_quiet(["group", "create", "--name", resource_group, "--location", location])
@@ -1225,7 +1415,7 @@ def _create_azure(
         simulator_secret,
         libelula_key,
         libelula_webhook,
-        llm_api_key or "",
+        *(llm_credentials or {}).values(),
     )
 
     ai_payload = _fastapi_containerapp_payload(
@@ -1234,8 +1424,7 @@ def _create_azure(
         image=image_urls["ai"],
         app_database_url=app_database_url,
         ia_key=ia_key,
-        llm_provider=llm_provider,
-        llm_api_key=llm_api_key,
+        llm_credentials=llm_credentials,
     )
     _create_containerapp(
         runner,
@@ -1366,8 +1555,8 @@ def _create_azure(
         "logs_destination": "none",
         "ghcr_owner": ghcr_owner,
         "image_urls": image_urls,
-        "llm_provider": llm_provider if llm_api_key else "local_rules",
-        "llm_configured": bool(llm_api_key),
+        "llm_providers": sorted((llm_credentials or {}).keys()),
+        "llm_configured": bool(llm_credentials),
         "fastapi_fqdn": fastapi_fqdn,
         "fastapi_url": f"https://{fastapi_fqdn}",
         "api_fqdn": api_fqdn,
@@ -1456,16 +1645,25 @@ def _print_cleanup(state: dict) -> None:
         print("Revísalos en el Portal; si ese grupo contiene solo esta prueba, elimínalo con:", file=sys.stderr)
         print(f"  az group delete --name {rg} --yes --no-wait", file=sys.stderr)
         print(f"Metadatos sin secretos: {BUILD_STATE.relative_to(ROOT)}", file=sys.stderr)
-        print("La base Neon se conserva. Para repetir desde cero, crea un proyecto Neon nuevo con una base vacía.", file=sys.stderr)
+        print("Neon se conserva; el archivo de estado registra el último punto alcanzado.", file=sys.stderr)
     elif state.get("neon_setup_started") and not state.get("neon_prepared"):
-        print("\nEl setup Neon pudo quedar parcial. No repitas seed sobre esa base; inspecciónala o crea un proyecto nuevo.", file=sys.stderr)
+        print("\nLa restauración Neon pudo quedar parcial. Inspecciona la base antes de continuar; el asistente no borrará tablas desconocidas automáticamente.", file=sys.stderr)
     elif state.get("neon_prepared"):
-        print("\nNeon quedó preparada, pero Azure no creó su Resource Group. No vuelvas a ejecutar sobre esa DB; inspecciónala o crea un proyecto Neon nuevo.", file=sys.stderr)
+        print("\nNeon quedó preparada, pero Azure no terminó. Puedes volver a ejecutar y confirmar RESTABLECER-DEMO para reponer los datos de fábrica.", file=sys.stderr)
 
 
 def main() -> int:
     runner = Runner()
-    state: dict = {"status": "starting", "resource_group_created": False, "neon_setup_started": False}
+    previous_state = _load_state()
+    state: dict = {
+        "run_id": secrets.token_hex(8),
+        "status": "starting",
+        "resource_group_created": False,
+        "neon_setup_started": False,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "previous_run_id": previous_state.get("run_id"),
+    }
+    _save_state(state)
     try:
         if not shutil.which("az"):
             raise DeployError("Falta Azure CLI (az). Ejecuta desplegar-azure.bat en Windows con Azure CLI instalada.")
@@ -1489,12 +1687,14 @@ def main() -> int:
         if input("Para continuar con las comprobaciones, escribe CONTINUAR: ").strip() != "CONTINUAR":
             raise DeployError("Cancelado antes de abrir Neon o cambiar la suscripción/recursos.")
 
-        subscription_id, subscription_name = _subscription(runner)
+        subscription_id, subscription_name = _subscription(runner, str(previous_state.get("subscription_id") or "") or None)
         default_region, allowed_regions = _default_region(runner)
         if allowed_regions:
             print("Tu suscripción solo permite estas regiones compatibles con Express: " + ", ".join(allowed_regions))
-        location = input(f"Región Azure (nombre corto) [{default_region}]: ").strip() or default_region
-        ghcr_owner = normalize_ghcr_owner(input("Owner de GitHub que publica los paquetes públicos GHCR: "))
+        saved_location = str(previous_state.get("location") or default_region)
+        location = input(f"Región Azure (nombre corto) [{saved_location}]: ").strip() or saved_location
+        saved_owner = str(previous_state.get("ghcr_owner") or "")
+        ghcr_owner = normalize_ghcr_owner(input(f"Owner de GitHub que publica los paquetes públicos GHCR [{saved_owner}]: ").strip() or saved_owner)
         names = _resource_names()
         state.update({**names, "subscription_id": subscription_id, "subscription_name": subscription_name, "location": location, "ghcr_owner": ghcr_owner})
         print(f"Se reservará un Resource Group nuevo: {names['resource_group']} (no se borrarán recursos existentes).")
@@ -1504,30 +1704,32 @@ def main() -> int:
         _check_azure_preflight(runner, subscription_id, location, names)
         image_urls = check_public_ghcr_images(ghcr_owner)
         print("Preflight Azure y lectura anónima de las tres imágenes GHCR correctos; aún no se han creado recursos.")
-        print("\nAbriendo Neon. Crea un proyecto Neon NUEVO (no reutilices otro proyecto) con una base/branch vacía.")
-        print("En Connection Details elige la conexión directa (sin -pooler) y copia la URL PostgreSQL del owner.")
+        print("\nAbriendo Neon. Usa una base/branch dedicada a FashionStore; no pegues una base con datos ajenos.")
+        print("Puedes pegar la URL directa o pooled; el asistente convertirá -pooler al endpoint directo para migraciones.")
         print("La URL se pedirá oculta, se usará localmente y no se guardará en archivos del repo.")
         print(f"Si el navegador no abre automáticamente, visita: {NEON_CONSOLE}")
         webbrowser.open(NEON_CONSOLE)
         owner_url = getpass.getpass("Pega la URL directa owner de Neon (entrada oculta): ").strip()
         owner = parse_neon_connection_url(owner_url)
         runner.add_sensitive(owner.original_url, owner.password)
-        preflight_neon(runner, owner)
+        if owner.input_was_pooled:
+            print("Detecté -pooler en el host y lo normalicé automáticamente para ejecutar schema/migraciones/seed.")
+        neon_state = preflight_neon(runner, owner)
+        state.update({"neon_database": owner.database, "neon_input_was_pooled": owner.input_was_pooled, "neon_state_before_restore": neon_state})
+        _save_state(state)
+        if neon_state == "fashionstore":
+            print("ATENCIÓN: se eliminarán los datos actuales de FashionStore en public y se repondrá toda la demo local.")
+            if input("Para confirmar esta restauración escribe RESTABLECER-DEMO: ").strip() != "RESTABLECER-DEMO":
+                raise DeployError("Restauración cancelada; no se modificó Neon.")
 
-        admin_password = _read_new_secret(
-            "Nueva contraseña para admin@fashionstore.bo (14+ caracteres; no uses la demo): ",
-            minimum=14,
-            forbidden=("Fashion2026!",),
-        )
-        runner.add_sensitive(admin_password)
-        llm_provider, llm_api_key = _read_optional_llm_credentials()
-        runner.add_sensitive(llm_api_key or "")
+        llm_credentials = _read_optional_llm_credentials()
+        runner.add_sensitive(*(llm_credentials or {}).values())
 
         print("\nConfirmación final:")
-        print("- Se aplicarán schema.sql, migraciones 003–010 y seed a la base Neon vacía.")
-        print("- Se creará fashionstore_app con privilegios runtime y se cambiará la contraseña semilla del admin.")
+        print("- Se aplicarán schema.sql, todas las migraciones 003–010 y seed.sql, igual que iniciar.py en modo local.")
+        print("- Se conservarán exactamente las cinco cuentas semilla y sus contraseñas locales; no se desactivarán usuarios.")
         print(f"- Se usarán imágenes GHCR públicas de {ghcr_owner}; no se crea ACR ni se guardan tokens de registry.")
-        print("- IA generativa: " + (f"clave de {llm_provider} configurada en secreto de FastAPI." if llm_api_key else "sin clave externa; funcionará el asistente local determinista con datos de la base."))
+        print("- IA generativa: " + (f"claves configuradas para {', '.join(sorted(llm_credentials))} en secretos de FastAPI." if llm_credentials else "sin claves externas; funcionará el asistente local determinista con datos de la base."))
         print("- Luego se crearán Resource Group, entorno Express sin Log Analytics y 3 Container Apps a escala cero; uso/egress fuera de cuotas podría generar cargos Azure.")
         print("- No se borrará Neon ni Azure automáticamente si algo falla.")
         if input("Escribe DEPLOY-TEST para aplicar la base y desplegar: ").strip() != "DEPLOY-TEST":
@@ -1535,10 +1737,17 @@ def main() -> int:
 
         state["neon_setup_started"] = True
         state["status"] = "neon_setup_in_progress"
-        app_database_url, app_database_password = prepare_neon_database(runner, owner, admin_password)
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _save_state(state)
+        app_database_url, app_database_password, seed_report = prepare_neon_database(
+            runner, owner, reset_existing=(neon_state == "fashionstore")
+        )
         runner.add_sensitive(app_database_url, app_database_password)
         state["neon_prepared"] = True
-        print("Neon quedó preparado; la URL runtime y las contraseñas no se mostrarán.")
+        state["database_seed_report"] = seed_report
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _save_state(state)
+        print(f"Neon quedó preparado y verificado: {seed_report['tables']} tablas, {seed_report['rows']} filas, {seed_report['demo_users_active_and_password_verified']} usuarios semilla activos.")
 
         result, api_payload = _create_azure(
             runner,
@@ -1551,8 +1760,7 @@ def main() -> int:
             ghcr_owner=ghcr_owner,
             image_urls=image_urls,
             state=state,
-            llm_provider=llm_provider,
-            llm_api_key=llm_api_key,
+            llm_credentials=llm_credentials,
         )
 
         print("\nEsperando FastAPI HTTPS en /health ...")
@@ -1571,23 +1779,30 @@ def main() -> int:
         state.update(result)
         state["status"] = "deployed"
         state["stripe_test_configured"] = False
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
         _save_state(state)
+        _record_state_history(state)
 
         print("\nDESPLIEGUE CLOUD VERIFICADO")
         print(f"Web: {result['web_url']}")
         print(f"API: {result['api_url']}")
         print(f"Salud Nest+Neon: {result['api_url']}/api/health")
-        print(f"Inicio de sesión demo: legacy / {result['admin_email']} / contraseña elegida localmente")
+        print(f"Inicio de sesión demo: legacy / {result['admin_email']} / {SEED_PASSWORD}")
+        print("Otras cuentas: encargado@fashionstore.bo, cajero@fashionstore.bo, proveedor@fashionstore.bo y cliente@fashionstore.bo (misma contraseña semilla).")
         print(f"Resource Group de prueba: {result['resource_group']}")
 
         try:
             stripe_configured = maybe_enable_stripe(runner, result, api_payload)
             state["stripe_test_configured"] = stripe_configured
+            state["updated_at"] = datetime.now(timezone.utc).isoformat()
             _save_state(state)
+            _record_state_history(state)
         except DeployError as exc:
             state["stripe_test_configured"] = False
             state["stripe_setup_error"] = _redact(str(exc), runner.sensitive)
+            state["updated_at"] = datetime.now(timezone.utc).isoformat()
             _save_state(state)
+            _record_state_history(state)
             print(f"[STRIPE] Despliegue activo, pero Stripe test no quedó configurado: {state['stripe_setup_error']}", file=sys.stderr)
 
         print("\nEl despliegue respondió en vivo; esto no acredita una operación de compra ni un webhook Stripe real.")
@@ -1598,23 +1813,26 @@ def main() -> int:
 
     except KeyboardInterrupt:
         print("\nInterrumpido. Revisa Azure si ya empezó la creación; no se eliminó ningún recurso.", file=sys.stderr)
-        if state.get("resource_group_created") or state.get("neon_setup_started"):
-            state["status"] = "interrupted"
-            try:
-                _save_state(state)
-            except OSError:
-                pass
+        state["status"] = "interrupted"
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            _save_state(state)
+            _record_state_history(state)
+        except OSError:
+            pass
         _print_cleanup(state)
         return 130
     except Exception as exc:
         safe_message = _redact(str(exc), runner.sensitive)
         print(f"[ERROR] {safe_message}", file=sys.stderr)
-        if state.get("resource_group_created") or state.get("neon_setup_started"):
-            state["status"] = "incomplete"
-            try:
-                _save_state(state)
-            except OSError:
-                pass
+        state["status"] = "incomplete"
+        state["error"] = safe_message
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            _save_state(state)
+            _record_state_history(state)
+        except OSError:
+            pass
         _print_cleanup(state)
         return 2
 

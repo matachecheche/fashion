@@ -806,9 +806,16 @@ def _guardar_conversacion(req: ChatRequest, respuesta: str, intencion: str, prov
 
 
 @router.get("/estado")
-def estado_asistente() -> Dict[str, str]:
+def estado_asistente(probar: bool = False) -> Dict[str, Any]:
+    """Report configured AI provider; ?probar=true checks each key without exposing it."""
     llm = LLMClient()
-    return {"proveedor": llm.active_provider, "modo": "generativo" if llm.active_provider != "local_rules" else "local"}
+    result: Dict[str, Any] = {
+        "proveedor": llm.active_provider,
+        "modo": "generativo" if llm.active_provider != "local_rules" else "local",
+    }
+    if probar:
+        result["pruebas"] = llm.probe()
+    return result
 
 
 @router.post("/chat")

@@ -15,9 +15,9 @@ class Settings:
     database_ssl: bool = os.getenv("DATABASE_SSL", "false").lower() in ("1", "true", "yes", "require")
     ia_internal_key: str = os.getenv("IA_INTERNAL_KEY", "").strip()
     groq_api_key: str = os.getenv("GROQ_API_KEY", "").strip()
-    groq_model: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+    groq_model: str = os.getenv("GROQ_MODEL", "auto").strip()
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "").strip()
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+    gemini_model: str = os.getenv("GEMINI_MODEL", "auto").strip()
     cors_origins: str = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000").strip()
 
 

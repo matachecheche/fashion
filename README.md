@@ -150,7 +150,7 @@ o con `POST /api/auth/registrar-tienda`.
 backend-nest/      API SaaS: auth JWT + tenant binding, catálogo, inventario,
                    ventas, reservas, POS, pagos (sandbox), reportes, sync offline,
                    suscripción, notificaciones, propuestas, usuarios.
-backend-fastapi/   IA: chat local (rules) o Groq si GROQ_API_KEY, estimación de
+backend-fastapi/   IA: chat local, Groq y Gemini con descubrimiento de modelos y fallback entre proveedores, estimación de
                    talla (IMC), análisis ML y rutas demo de entrenamiento/predicción
                    persistente por tenant con datos sintéticos; 8 pytest + 6 IA pasan.
 frontend-web/      PWA React: tienda online, checkout, pedidos, reservas, POS,
@@ -242,7 +242,7 @@ de Stripe en modo test.
 
 Para el flujo asistido de despliegue de NestJS, FastAPI y la web en Container Apps con Neon,
 ejecuta `desplegar-azure.bat` y consulta [`docs/DESPLIEGUE-AZURE.md`](docs/DESPLIEGUE-AZURE.md).
-El BAT inicia sesión Azure si hace falta; el asistente abre Neon para que crees un proyecto nuevo y pide localmente la URL directa oculta. GHCR quedó confirmado como registro para `.github/workflows/publish-ghcr.yml`; antes de desplegar hay que publicar los tres paquetes y hacerlos públicos. El despliegue no crea ACR. El flujo ya está implementado, pero **no se ha ejecutado contra Azure/Neon reales** desde este entorno. ACA y el egress pueden generar cargos fuera de la asignación gratuita; no se garantiza costo cero.
+El BAT inicia sesión Azure si hace falta; el asistente pide la URL Neon de forma oculta y normaliza también las URLs pooled. En cada despliegue aplica el mismo `schema.sql` + migraciones + `seed.sql` que el modo local; si detecta una base FashionStore existente, exige `RESTABLECER-DEMO` antes de reemplazar sus datos. Conserva los cinco usuarios de prueba con la misma contraseña que local. Admite simultáneamente Groq (`gsk_...`) y Gemini (`AIza...` o `AQ.Ab8R...`), y distingue ambas claves de Stripe (`rk_test_...`). Si el despliegue se interrumpe, guarda el último estado y un historial limitado de ejecuciones sin guardar secretos en `builds/`; reusa como valores predeterminados la última suscripción, región y cuenta GHCR. GHCR quedó confirmado como registro para `.github/workflows/publish-ghcr.yml`; antes de desplegar hay que publicar los tres paquetes y hacerlos públicos. El despliegue no crea ACR. El flujo ya está implementado, pero **no se ha ejecutado contra Azure/Neon reales** desde este entorno. ACA y el egress pueden generar cargos fuera de la asignación gratuita; no se garantiza costo cero.
 
 ## App móvil — compilar el APK
 
@@ -261,7 +261,7 @@ npx tsc --noEmit
 
 Fecha de corte: **2026-11-10**. El registro íntegro, con separación entre evidencia histórica y actual, está en `docs/VERIFICACION.md` §§20–24; §24 prevalece para el flujo de publicación GHCR/despliegue Azure.
 
-**Última actualización (flujo asistido Azure/Neon):** `desplegar-azure.bat` inicia sesión Azure CLI si hace falta y lanza el asistente local; abre Neon para crear un proyecto nuevo, recibe su URL directa oculta, exige las migraciones `003`–`010` y aplica schema/migraciones/seed tras confirmación. GHCR fue confirmado como registry; GitHub Actions construye/publica las imágenes y el usuario debe poner cada paquete en visibilidad Public antes de que pase el pull anónimo. El despliegue no crea ACR, identidad ni Log Analytics. La web usa `/api` con proxy Nginx de API_UPSTREAM runtime. **No se ha ejecutado un despliegue Azure/Neon ni el workflow GHCR:** este entorno no tiene sesión Azure/Neon/GitHub. ACA y el egress pueden generar cargos fuera de la asignación gratuita; no se promete $0 total. Ver `docs/DESPLIEGUE-AZURE.md`.
+**Última actualización (flujo asistido Azure/Neon):** `desplegar-azure.bat` inicia sesión Azure CLI si hace falta y lanza el asistente local; recibe la URL Neon oculta (directa o pooled, normalizada automáticamente), distingue bases vacías/FashionStore/ajenas, y exige confirmación explícita antes de restaurar una base FashionStore existente. Aplica `schema.sql`, las migraciones `003`–`010` y `seed.sql` como en local y verifica las cinco cuentas de prueba sin cambiar sus hashes o estados. Admite claves Groq y Gemini simultáneamente con descubrimiento de modelos y guarda metadatos/historial de despliegue sin secretos. GHCR fue confirmado como registry; GitHub Actions construye/publica las imágenes y el usuario debe poner cada paquete en visibilidad Public antes de que pase el pull anónimo. El despliegue no crea ACR, identidad ni Log Analytics. La web usa `/api` con proxy Nginx de API_UPSTREAM runtime. **No se ha ejecutado un despliegue Azure/Neon ni el workflow GHCR:** este entorno no tiene sesión Azure/Neon/GitHub. ACA y el egress pueden generar cargos fuera de la asignación gratuita; no se promete $0 total. Ver `docs/DESPLIEGUE-AZURE.md`.
 
 **Ejecutado en esta ronda histórica:**
 
