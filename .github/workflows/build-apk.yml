@@ -1,0 +1,64 @@
+name: Build APK Android (release autónomo)
+
+# Compila el APK en GitHub Actions con el mismo script que usa Azure Pipelines
+# (mobile-app/ci/build-azure-apk.sh). No requiere Azure DevOps.
+# Ejecutar: Actions -> "Build APK Android" -> Run workflow -> pegar la URL de la API.
+on:
+  workflow_dispatch:
+    inputs:
+      api_url:
+        description: 'URL pública HTTPS de la API NestJS, terminada en /api (ej. https://xxx.azurecontainerapps.io/api)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    name: APK release firmado (clave CI temporal)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      EXPO_PUBLIC_API_URL: ${{ inputs.api_url || vars.EXPO_PUBLIC_API_URL }}
+      EXPO_PUBLIC_DEFAULT_TENANT_SLUG: legacy
+      BUILD_BUILDID: ${{ github.run_number }}
+      BUILD_SOURCEVERSION: ${{ github.sha }}
+      BUILD_ARTIFACTSTAGINGDIRECTORY: ${{ github.workspace }}/artifacts/FashionStore-APK
+      AGENT_TEMPDIRECTORY: ${{ runner.temp }}
+      NPM_CONFIG_CACHE: ${{ runner.temp }}/.npm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.19.x'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Permisos de escritura en el Android SDK
+        run: |
+          ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          sudo mkdir -p "$ANDROID_HOME"
+          sudo chown -R "$USER" "$ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.gradle
+          key: gradle-${{ runner.os }}-${{ hashFiles('mobile-app/package-lock.json') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Compilar y verificar el APK
+        run: bash mobile-app/ci/build-azure-apk.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FashionStore-APK
+          path: artifacts/FashionStore-APK/
+          if-no-files-found: error
+          retention-days: 30

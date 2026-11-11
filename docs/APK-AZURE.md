@@ -59,3 +59,11 @@ El pipeline verifica la compilación nativa, la firma, la alineación, el `appli
 ### Ejecutar las pruebas en Windows sin WSL
 
 El script `mobile-app/ci/build-azure-apk.sh` se ejecuta en el agente Linux `ubuntu-24.04` de Azure Pipelines. En Windows, la prueba local busca GNU Bash real (incluido Git Bash). Si solo encuentra el lanzador `bash.exe` de WSL y no hay una distribución Linux instalada, la prueba de sintaxis Bash se marca como **omitida**, no como fallida. Esto no omite la comprobación en Azure: el agente Ubuntu ejecuta el script y el pipeline falla si la sintaxis es incorrecta. Para ejecutar esa comprobación también localmente, instala Git for Windows con Git Bash o una distribución WSL.
+
+## Alternativa sin Azure DevOps: compilar el APK en GitHub Actions
+
+El workflow `.github/workflows/build-apk.yml` ejecuta el mismo script `mobile-app/ci/build-azure-apk.sh` en GitHub Actions.
+
+1. Despliega primero la API en Azure (`desplegar-azure.bat`) y copia su URL pública HTTPS terminada en `/api`.
+2. En GitHub: **Actions → Build APK Android (release autónomo) → Run workflow** y pega esa URL (o guárdala una vez como variable de repositorio `EXPO_PUBLIC_API_URL`).
+3. Al terminar, descarga el artefacto **FashionStore-APK** desde el resumen de la ejecución.
