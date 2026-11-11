@@ -491,7 +491,8 @@ module.exports = {Client};
             self.assertEqual(verified.stdout.strip(), "VERIFY OK esquema_version=10 cuenta_admin=1")
 
             sql_file = Path(temp_dir) / "migration file with spaces.sql"
-            sql_file.write_text("SELECT 1; SELECT 2;\n", encoding="utf-8")
+            # Write bytes so Windows newline translation cannot turn LF into CRLF.
+            sql_file.write_bytes(b"SELECT 1; SELECT 2;\n")
             applied = subprocess.run(
                 [node, str(script), "file", str(sql_file)],
                 env=env,
@@ -902,14 +903,17 @@ class LocalSafetyRegressionTests(unittest.TestCase):
 
         command = run.call_args.args[0]
         self.assertIsInstance(command, str)
-        self.assertTrue(command.startswith('"' + comspec + '" /d /c call '))
+        # Windows may expose SystemRoot with different path casing. Compare the
+        # executable path case-insensitively, as Windows itself does.
+        command_prefix = ('"' + comspec + '" /d /c call ').casefold()
+        self.assertTrue(command.casefold().startswith(command_prefix), command)
         self.assertIn('"' + az_cmd + '"', command)
         self.assertIn('"East US"', command)
         self.assertIn('"@C:\\Users\\Test User\\AppData\\Local\\Temp\\payload.json"', command)
         self.assertNotIn("/s", command)
         self.assertNotIn("powershell", command.lower())
         self.assertNotIn("FASHIONSTORE_AZ_ARGS_JSON", run.call_args.kwargs["env"])
-        self.assertEqual(run.call_args.kwargs["env"]["COMSPEC"], comspec)
+        self.assertEqual(run.call_args.kwargs["env"]["COMSPEC"].casefold(), comspec.casefold())
         # Azure CLI inherits the working directory already set by the launcher BAT.
         self.assertIsNone(run.call_args.kwargs["cwd"])
 

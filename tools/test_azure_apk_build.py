@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
 import unittest
 from pathlib import Path
@@ -14,6 +16,62 @@ DOC = ROOT / "docs/APK-AZURE.md"
 APP_CONFIG = ROOT / "mobile-app/app.json"
 
 
+def find_usable_bash() -> str | None:
+    r"""Find a real GNU Bash, not the Windows WSL launcher without a distro.
+
+    The APK build script runs on Azure's Ubuntu agent. On Windows, Bash is
+    optional; `C:\Windows\System32\bash.exe` may only be the WSL shim and
+    returns an error when no Linux distribution is installed. In that case
+    the local syntax check is skipped, while Azure Ubuntu still runs it.
+    """
+    candidates: list[str] = []
+    discovered = shutil.which("bash")
+    if discovered:
+        candidates.append(discovered)
+
+    if os.name == "nt":
+        program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+        program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        for base in (program_files, program_files_x86, local_app_data):
+            if base:
+                candidates.extend([
+                    str(Path(base) / "Git" / "bin" / "bash.exe"),
+                    str(Path(base) / "Git" / "usr" / "bin" / "bash.exe"),
+                ])
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = os.path.normcase(os.path.abspath(candidate))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            # A WSL launcher can sometimes answer `--version` without proving
+            # that a Linux distribution is available. Execute a tiny shell
+            # command as well; Git Bash and real GNU Bash both pass this probe.
+            marker = "FASHIONSTORE_GNU_BASH_PROBE_OK"
+            functional = subprocess.run(
+                [candidate, "-c", f"printf '%s' {marker}"],
+                capture_output=True, text=True, timeout=8, check=False,
+            )
+            version = subprocess.run(
+                [candidate, "--version"], capture_output=True, text=True,
+                timeout=8, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        output = (version.stdout or "") + (version.stderr or "")
+        if (
+            functional.returncode == 0
+            and marker in (functional.stdout or "")
+            and version.returncode == 0
+            and "GNU bash" in output
+        ):
+            return candidate
+    return None
+
+
 class AzureStandaloneApkTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -22,8 +80,18 @@ class AzureStandaloneApkTests(unittest.TestCase):
         cls.doc = DOC.read_text(encoding="utf-8")
 
     def test_shell_script_has_valid_bash_syntax(self) -> None:
-        result = subprocess.run(["bash", "-n", str(BUILD_SCRIPT)], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        bash = find_usable_bash()
+        if not bash:
+            self.skipTest(
+                "Bash GNU no está instalado o el comando disponible es solo el "
+                "lanzador WSL sin una distribución Linux. Esta comprobación se "
+                "ejecuta en el agente Ubuntu de Azure Pipelines; instale Git Bash "
+                "para ejecutarla también localmente en Windows."
+            )
+        result = subprocess.run(
+            [bash, "-n", str(BUILD_SCRIPT)], capture_output=True, text=True, timeout=15
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_pipeline_references_script_and_publishes_artifact(self) -> None:
         self.assertIn("vmImage: ubuntu-24.04", self.pipeline)

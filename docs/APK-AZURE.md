@@ -55,3 +55,7 @@ Este APK RELEASE firmado con clave interna de pruebas no debe subirse a Google P
 ## Limitaciones de verificación
 
 El pipeline verifica la compilación nativa, la firma, la alineación, el `applicationId`, el `versionCode`, el bundle JS y la URL de API. No inicia un emulador Android en el agente Linux hospedado. La prueba final de instalación/ejecución se debe realizar en un teléfono Android real; Azure Pipelines no debe marcarse como prueba funcional en dispositivo si no se ejecuta ese paso aparte.
+
+### Ejecutar las pruebas en Windows sin WSL
+
+El script `mobile-app/ci/build-azure-apk.sh` se ejecuta en el agente Linux `ubuntu-24.04` de Azure Pipelines. En Windows, la prueba local busca GNU Bash real (incluido Git Bash). Si solo encuentra el lanzador `bash.exe` de WSL y no hay una distribución Linux instalada, la prueba de sintaxis Bash se marca como **omitida**, no como fallida. Esto no omite la comprobación en Azure: el agente Ubuntu ejecuta el script y el pipeline falla si la sintaxis es incorrecta. Para ejecutar esa comprobación también localmente, instala Git for Windows con Git Bash o una distribución WSL.
