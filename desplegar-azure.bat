@@ -13,10 +13,11 @@ echo.
 where az >nul 2>&1
 if errorlevel 1 goto NO_AZURE
 
-az account show --only-show-errors --output none >nul 2>&1
+rem Azure CLI is usually az.cmd on Windows; CALL is required to resume this BAT.
+call az account show --only-show-errors --output none >nul 2>&1
 if errorlevel 1 (
   echo No hay una sesion Azure CLI activa. Se abrira el inicio de sesion de Microsoft.
-  az login
+  call az login
   if errorlevel 1 goto LOGIN_ERROR
 ) else (
   echo [OK] Se reutilizara la sesion Azure CLI activa.
@@ -24,14 +25,20 @@ if errorlevel 1 (
 
 echo.
 echo Suscripcion activa en Azure CLI:
-az account show --query "{name:name,id:id,tenantId:tenantId}" --output table
+call az account show --query "{name:name,id:id,tenantId:tenantId}" --output table
 if errorlevel 1 goto LOGIN_ERROR
 
 echo.
 where psql >nul 2>&1
-if errorlevel 1 goto NO_PSQL
-echo [OK] psql encontrado (solo se necesita el cliente; no un servidor local).
+if not errorlevel 1 (
+  echo [OK] psql encontrado (solo se necesita el cliente; no un servidor local).
+  goto HAVE_SQL_CLIENT
+)
+where node >nul 2>&1
+if errorlevel 1 goto NO_SQL_CLIENT
+echo [OK] psql no esta instalado; se probara el ayudante Node.js con el paquete pg de backend-nest.
 
+:HAVE_SQL_CLIENT
 where py >nul 2>&1
 if not errorlevel 1 (
   set "PYTHON=py -3"
@@ -48,7 +55,7 @@ if errorlevel 1 goto NO_PYTHON
 if errorlevel 1 goto PYTHON_TOO_OLD
 
 echo Instalando o actualizando la extension oficial containerapp de Azure CLI...
-az extension add --name containerapp --upgrade
+call az extension add --name containerapp --upgrade
 if errorlevel 1 goto EXTENSION_ERROR
 
 echo.
@@ -77,8 +84,8 @@ echo Luego vuelve a ejecutar este BAT para iniciar sesion y desplegar.
 pause
 exit /b 2
 
-:NO_PSQL
-echo [FALTA] psql. Instala PostgreSQL Command Line Tools y agregalos al PATH.
+:NO_SQL_CLIENT
+echo [FALTA] un cliente SQL. Instala psql, o instala Node.js y las dependencias ejecutando npm ci en backend-nest.
 echo No hace falta instalar ni ejecutar un servidor PostgreSQL local.
 pause
 exit /b 2

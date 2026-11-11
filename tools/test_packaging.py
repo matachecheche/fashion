@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from iniciar import ensure_nest_dependencies, ensure_postgres, main, mode_docker, nest_dependencies_ready, nest_env  # noqa: E402
+from iniciar import ensure_nest_dependencies, ensure_postgres, fastapi_env, main, mode_docker, nest_dependencies_ready, nest_env  # noqa: E402
 from tools import paquetizar_proyecto as pack  # noqa: E402
 from tools import verificar_manifiesto as verify  # noqa: E402
 
@@ -85,6 +85,28 @@ class PackageFilterTests(unittest.TestCase):
 
 
 class StartupDependencyChecks(unittest.TestCase):
+    def test_example_database_url_uses_generated_fs_app_for_nest_and_fastapi(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for service in ("backend-nest", "backend-fastapi"):
+                directory = root / service
+                directory.mkdir()
+                (directory / ".env").write_text(
+                    "DATABASE_URL=postgresql://USER:REPLACE_ME@127.0.0.1:5432/fashionstore\n",
+                    encoding="utf-8",
+                )
+            builds = root / "builds"
+            builds.mkdir()
+            (builds / ".fs_app_password").write_text("synthetic-local-role-password\n", encoding="utf-8")
+
+            with patch("iniciar.ROOT", root):
+                nest = nest_env()
+                fastapi = fastapi_env()
+
+        expected = "postgresql://fs_app:synthetic-local-role-password@127.0.0.1:5432/fashionstore"
+        self.assertEqual(nest["DATABASE_URL"], expected)
+        self.assertEqual(fastapi["DATABASE_URL"], expected)
+
     def test_native_simulator_secret_is_separate_from_stripe_webhook_secret(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

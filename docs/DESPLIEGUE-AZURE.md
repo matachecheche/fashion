@@ -21,7 +21,7 @@ La web se compila una sola vez con `VITE_API_URL=/api` y `nginx.azure.conf`. En 
 ## Requisitos locales en Windows
 
 1. Azure CLI y una suscripción habilitada. El BAT ejecuta `az login` si no hay sesión y actualiza la extensión `containerapp`.
-2. Python 3.10+ (`py -3` o `python`) y `psql` en `PATH`; no hace falta servidor PostgreSQL ni Docker locales.
+2. Python 3.10+ (`py -3` o `python`) y un cliente SQL: `psql` en `PATH`, o Node.js con `backend-nest/node_modules/pg` instalado (`cd backend-nest && npm ci`). No hace falta un servidor PostgreSQL ni Docker locales.
 3. Un repositorio GitHub con Actions habilitadas. El workflow `.github/workflows/publish-ghcr.yml` construye las imágenes al hacer push a `main` o desde `workflow_dispatch`; luego debes cambiar las tres a visibilidad **Public** en GitHub Packages. Este paso público es irreversible y expone las imágenes compiladas.
 4. Internet, navegador y un proyecto Neon nuevo creado manualmente.
 5. Una suscripción Azure con Container Apps Express disponible en la región elegida y permisos para registrar `Microsoft.App` y crear recursos (normalmente Contributor u Owner). El flujo no registra `Microsoft.OperationalInsights`, no crea ACR/Log Analytics ni asignaciones RBAC.
@@ -36,7 +36,7 @@ Desde la raíz de FashionStore, haz doble clic en `desplegar-azure.bat` o ejecú
 desplegar-azure.bat
 ```
 
-El BAT comprueba Azure CLI y la sesión, instala/actualiza la extensión oficial `containerapp`, valida Python 3.10+ y `psql`, abre esta guía e inicia `tools/deploy_azure.py`. Docker local no se consulta ni se requiere.
+El BAT comprueba Azure CLI y la sesión, instala/actualiza la extensión oficial `containerapp`, valida Python 3.10+ y comprueba que haya `psql` o Node.js. Si falta `psql`, `tools/deploy_azure.py` usa `tools/cloud_sql.js` con el paquete `pg` ya declarado por NestJS; si ese paquete aún no está instalado, ejecuta `cd backend-nest && npm ci` y vuelve a intentar. Docker local no se consulta ni se requiere.
 
 ### Publicar las imágenes públicas GHCR antes de desplegar
 
@@ -49,7 +49,7 @@ Las imágenes públicas pueden revelar el código compilado de Nest/FastAPI; con
 ### A. Selección Azure y Neon manual en navegador
 
 1. Si no hay sesión, sigue el inicio de sesión Microsoft que abre `az login`.
-2. El asistente solicita confirmación explícita para la configuración GHCR; responde `N` si cambiaste de decisión y quieres detenerte antes de cualquier preflight. Si confirmas, escribe `CONTINUAR`, elige suscripción, una región compatible con Express y owner GitHub. Luego se registra solo `Microsoft.App` si hace falta (metadatos) y se verifica lectura anónima de las tres imágenes antes de abrir Neon; aún no se crean recursos ni se modifica la base. Regiones publicadas incluyen `brazilsouth`, `chilecentral`, `eastus` y `westus2`; además, la región debe estar disponible para tu suscripción.
+2. El asistente solicita confirmación explícita para la configuración GHCR; responde `N` si cambiaste de decisión y quieres detenerte antes de cualquier preflight. Si confirmas, escribe `CONTINUAR`, elige suscripción, una región compatible con Express y owner GitHub. Luego se registra solo `Microsoft.App` si hace falta (metadatos) y se verifica lectura anónima de las tres imágenes antes de abrir Neon; aún no se crean recursos ni se modifica la base. Regiones publicadas incluyen `brazilsouth`, `chilecentral`, `eastus` y `westus2`; la región elegida también debe estar disponible para la suscripción y permitida por cualquier directiva de Azure for Students. El preflight revisa las asignaciones de Azure Policy antes de tocar Neon y sugiere regiones Express permitidas si la seleccionada está bloqueada.
 3. El script abre [Neon Console](https://console.neon.tech/). Allí crea **un proyecto de prueba nuevo** (no basta con otra base dentro de un proyecto ya usado) y usa su branch/base **vacía**. En Connection Details selecciona conexión **directa/no pooled** para inicializar.
 4. Pega localmente la URL PostgreSQL del owner en el prompt oculto. No se muestra ni se escribe al repo. El asistente comprueba TLS, conectividad, que no haya tablas/datos existentes y que no exista `fashionstore_app` en ese proyecto.
 5. Elige una contraseña nueva (14+ caracteres) para `admin@fashionstore.bo`. La contraseña no se imprime.
@@ -69,7 +69,7 @@ Con la confirmación, el asistente verifica antes de escribir que estén exactam
 5. Cambia el password semilla de `admin@fashionstore.bo` al que elegiste y desactiva los otros usuarios demo.
 6. Comprueba que el nuevo rol puede iniciar sesión y leer la cuenta semilla bajo RLS.
 
-La URL de owner y las contraseñas se pasan localmente a `psql` y al payload protegido temporal de Azure; no se guardan en `builds/azure-test-deployment.json`. El archivo de estado contiene solo IDs, nombres y FQDNs.
+La URL de owner y las contraseñas se pasan localmente a `psql` o, si no está instalado, al ayudante Node mediante variables de entorno. El payload de Azure se escribe en un archivo temporal protegido y se elimina después; los secretos no se guardan en `builds/azure-test-deployment.json`. El archivo de estado contiene solo IDs, nombres y FQDNs.
 
 ### C. Recursos y pruebas Azure
 
@@ -126,7 +126,8 @@ az containerapp replica list --name <api_app> --resource-group <resource_group>
 
 Problemas habituales:
 
-- **Error en `psql`/migraciones:** verifica que copiaste una conexión Neon directa, que apunta a una branch nueva y que el owner tiene permisos para crear roles.
+- **El BAT vuelve al prompt justo después del banner:** actualiza la copia del proyecto. En Windows Azure CLI suele instalar `az.cmd`; el BAT debe invocarlo con `call az` para que la ejecución continúe. Ese síntoma ocurre antes de Neon y no crea recursos.
+- **Error del cliente SQL/migraciones:** verifica que copiaste una conexión Neon directa, que apunta a una branch nueva y que el owner tiene permisos para crear roles. Si se usa el fallback Node y dice que falta `pg`, ejecuta `cd backend-nest && npm ci` desde la raíz del proyecto y vuelve a abrir el BAT.
 - **GHCR pull:** vuelve a ejecutar el workflow y confirma que cada paquete `fashionstore-*` sea **Public**. El preflight prueba una descarga anónima de `latest` y se detiene antes de Neon si falta una imagen o el paquete es privado.
 - **API `502`/`503`:** revisa el estado de revisión, `DATABASE_URL`, TLS, `JWT_SECRET`, `FASTAPI_URL` y referencias de secretos. La app debe poder leer `meta` como `app_readonly`.
 - **API responde pero la web falla:** revisa `API_UPSTREAM` en la Container App web y que la imagen GHCR se publique con `NGINX_CONF=nginx.azure.conf`; el paquete web usa proxy same-origin y no necesita recompilarse con un FQDN Azure.

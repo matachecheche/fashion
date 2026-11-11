@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
+CLOUD_SQL_SCRIPT = ROOT / "tools" / "cloud_sql.js"
+NEST_DIR = ROOT / "backend-nest"
 BUILD_STATE = ROOT / "builds" / "azure-test-deployment.json"
 NEON_CONSOLE = "https://console.neon.tech/"
 STRIPE_TEST_WEBHOOKS = "https://dashboard.stripe.com/test/webhooks"
@@ -138,6 +140,27 @@ def _redact(text: str, sensitive: Iterable[str]) -> str:
     return result
 
 
+def _json_from_cli_output(output: str) -> object:
+    """Parse Azure CLI JSON even when a harmless warning surrounds the payload."""
+    try:
+        return json.loads(output)
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        positions: list[int] = []
+        for marker in ("[", "{"):
+            position = output.find(marker)
+            while position >= 0:
+                positions.append(position)
+                position = output.find(marker, position + 1)
+        for position in sorted(set(positions)):
+            try:
+                value, _end = decoder.raw_decode(output[position:])
+                return value
+            except json.JSONDecodeError:
+                continue
+    raise DeployError("Azure CLI no devolvió JSON válido para una consulta de control.")
+
+
 class Runner:
     """Run local tools quietly, redact child-process output, and avoid shell interpolation."""
 
@@ -199,10 +222,7 @@ class Runner:
 
     def az_json(self, args: Sequence[str]) -> object:
         output = self.run(["az", *args, "--output", "json"], quiet=True)
-        try:
-            return json.loads(output)
-        except json.JSONDecodeError as exc:
-            raise DeployError("Azure CLI no devolvió JSON válido para una consulta de control.") from exc
+        return _json_from_cli_output(output)
 
     def az_quiet(self, args: Sequence[str]) -> None:
         self.run(["az", *args, "--output", "none"], quiet=True)
@@ -249,13 +269,75 @@ def _psql(
     return runner.run(command, quiet=quiet, extra_env=env)
 
 
+def _node_pg_available() -> bool:
+    """Check whether Node can resolve the backend's existing `pg` dependency."""
+    node = shutil.which("node")
+    if not node or not CLOUD_SQL_SCRIPT.is_file():
+        return False
+    check = (
+        "try { require.resolve('pg', { paths: [process.argv[1]] }); } "
+        "catch (_error) { process.exit(1); }"
+    )
+    try:
+        result = subprocess.run(
+            [node, "-e", check, str(NEST_DIR)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _sql_driver() -> str | None:
+    """Prefer psql; fall back to the pg package already used by NestJS."""
+    if shutil.which("psql"):
+        return "psql"
+    if _node_pg_available():
+        return "node"
+    return None
+
+
+def _cloud_sql(
+    runner: Runner,
+    connection: NeonConnection,
+    command: str,
+    *args: str,
+    extra_env: dict[str, str] | None = None,
+) -> str:
+    node = shutil.which("node")
+    if not node or not CLOUD_SQL_SCRIPT.is_file() or not _node_pg_available():
+        raise DeployError(
+            "No hay cliente SQL disponible. Instala PostgreSQL Command Line Tools (psql), "
+            "o instala Node.js y las dependencias Nest con `cd backend-nest && npm ci`."
+        )
+    env = {
+        "DATABASE_URL": connection.original_url,
+        "FS_BACKEND_DIR": str(NEST_DIR),
+    }
+    if extra_env:
+        env.update(extra_env)
+        runner.add_sensitive(*extra_env.values())
+    runner.add_sensitive(connection.original_url, connection.password)
+    return runner.run([node, str(CLOUD_SQL_SCRIPT), command, *args], quiet=True, extra_env=env)
+
+
 def _psql_value(runner: Runner, connection: NeonConnection, sql: str) -> str:
-    return _psql(
-        runner,
-        ["--tuples-only", "--no-align", "--command", sql],
-        connection,
-        quiet=True,
-    ).strip()
+    if shutil.which("psql"):
+        return _psql(
+            runner,
+            ["--tuples-only", "--no-align", "--command", sql],
+            connection,
+            quiet=True,
+        ).strip()
+    raw = _cloud_sql(runner, connection, "scalar", sql)
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise DeployError("El ayudante SQL no devolvió un valor escalar válido.") from exc
+    return "" if value is None else str(value)
 
 
 def _neon_empty_state(runner: Runner, connection: NeonConnection) -> None:
@@ -292,8 +374,11 @@ def _neon_empty_state(runner: Runner, connection: NeonConnection) -> None:
 
 def preflight_neon(runner: Runner, connection: NeonConnection) -> None:
     """Non-mutating check before asking the user to initialize Neon."""
-    if not shutil.which("psql"):
-        raise DeployError("Falta psql. Instala PostgreSQL Command Line Tools antes de continuar.")
+    if not _sql_driver():
+        raise DeployError(
+            "Falta un cliente SQL: instala PostgreSQL Command Line Tools (psql), "
+            "o Node.js con las dependencias de backend-nest instaladas (`cd backend-nest && npm ci`)."
+        )
     _neon_empty_state(runner, connection)
     print("Conexión Neon correcta; la base está vacía y lista para preparar.")
 
@@ -619,24 +704,38 @@ def prepare_neon_database(runner: Runner, owner: NeonConnection, admin_password:
 
     for sql_file in files:
         print(f"Aplicando {sql_file.relative_to(ROOT)} ...")
-        _psql(runner, ["--quiet", "--file", str(sql_file)], owner)
+        if shutil.which("psql"):
+            _psql(runner, ["--quiet", "--file", str(sql_file)], owner)
+        else:
+            _cloud_sql(runner, owner, "file", str(sql_file))
 
     app_password = _new_hex_secret()
     runner.add_sensitive(owner.original_url, owner.password, app_password, admin_password)
-    bootstrap_sql = build_database_bootstrap_sql()
-    sql_path = _write_private_temp_text(bootstrap_sql, ".sql")
-    try:
-        _psql(
+    if shutil.which("psql"):
+        bootstrap_sql = build_database_bootstrap_sql()
+        sql_path = _write_private_temp_text(bootstrap_sql, ".sql")
+        try:
+            _psql(
+                runner,
+                ["--quiet", "--file", str(sql_path)],
+                owner,
+                extra_env={
+                    "FASHIONSTORE_APP_PASSWORD": app_password,
+                    "FASHIONSTORE_ADMIN_PASSWORD": admin_password,
+                },
+            )
+        finally:
+            sql_path.unlink(missing_ok=True)
+    else:
+        _cloud_sql(
             runner,
-            ["--quiet", "--file", str(sql_path)],
             owner,
+            "provision",
             extra_env={
-                "FASHIONSTORE_APP_PASSWORD": app_password,
-                "FASHIONSTORE_ADMIN_PASSWORD": admin_password,
+                "FS_APP_PASSWORD": app_password,
+                "FS_ADMIN_PASSWORD": admin_password,
             },
         )
-    finally:
-        sql_path.unlink(missing_ok=True)
 
     app_url = build_app_database_url(owner, "fashionstore_app", app_password)
     runner.add_sensitive(app_url)
@@ -647,23 +746,28 @@ def prepare_neon_database(runner: Runner, owner: NeonConnection, admin_password:
         username="fashionstore_app",
         password=app_password,
     )
-    access_check = _psql(
-        runner,
-        [
-            "--quiet",
-            "--tuples-only",
-            "--no-align",
-            "--command",
-            "BEGIN; SET LOCAL ROLE app_readonly; "
-            "SELECT set_config('app.tenant_id', 'legacy', true); "
-            "SELECT count(*)::text FROM public.usuarios "
-            "WHERE tenant_id='legacy' AND email='admin@fashionstore.bo'; COMMIT;",
-        ],
-        runtime_connection,
-    )
-    rows = [line.strip() for line in access_check.splitlines() if line.strip()]
-    if not rows or rows[-1] != "1":
-        raise DeployError("El rol runtime no pudo validar acceso de lectura/RLS a la cuenta semilla.")
+    if shutil.which("psql"):
+        access_check = _psql(
+            runner,
+            [
+                "--quiet",
+                "--tuples-only",
+                "--no-align",
+                "--command",
+                "BEGIN; SET LOCAL ROLE app_readonly; "
+                "SELECT set_config('app.tenant_id', 'legacy', true); "
+                "SELECT count(*)::text FROM public.usuarios "
+                "WHERE tenant_id='legacy' AND email='admin@fashionstore.bo'; COMMIT;",
+            ],
+            runtime_connection,
+        )
+        rows = [line.strip() for line in access_check.splitlines() if line.strip()]
+        if not rows or rows[-1] != "1":
+            raise DeployError("El rol runtime no pudo validar acceso de lectura/RLS a la cuenta semilla.")
+    else:
+        verification = _cloud_sql(runner, runtime_connection, "verify-app")
+        if not verification.startswith("VERIFY OK esquema_version=") or " cuenta_admin=1" not in verification:
+            raise DeployError("El rol runtime no pudo validar esquema ni acceso de lectura/RLS a la cuenta semilla.")
     return app_url, app_password
 
 
@@ -791,6 +895,41 @@ EXPRESS_REGIONS = frozenset(
 )
 
 
+def _policy_allowed_regions(runner: Runner) -> set[str] | None:
+    """Return the active subscription location allowlist, if Azure Policy defines one."""
+    assignments = runner.az_json(["policy", "assignment", "list", "--only-show-errors"])
+    if not isinstance(assignments, list):
+        raise DeployError("Azure Policy no devolvió la lista de asignaciones esperada.")
+
+    allowlists: list[set[str]] = []
+    for assignment in assignments:
+        if not isinstance(assignment, dict):
+            continue
+        properties = assignment.get("properties") if isinstance(assignment.get("properties"), dict) else {}
+        enforcement = str(assignment.get("enforcementMode") or properties.get("enforcementMode") or "").lower()
+        if enforcement == "donotenforce":
+            continue
+        parameters = assignment.get("parameters") or properties.get("parameters") or {}
+        if not isinstance(parameters, dict):
+            continue
+        effect = parameters.get("effect")
+        effect = effect.get("value") if isinstance(effect, dict) else effect
+        if effect and str(effect).lower() not in {"deny", "denyaction"}:
+            continue
+
+        for name, parameter in parameters.items():
+            normalized_name = str(name).lower()
+            if "allowed" not in normalized_name or not any(word in normalized_name for word in ("location", "region")):
+                continue
+            regions = parameter.get("value") if isinstance(parameter, dict) else parameter
+            if isinstance(regions, list):
+                allowlists.append({_normal_region(region) for region in regions if isinstance(region, str)})
+
+    if not allowlists:
+        return None
+    return set.intersection(*allowlists)
+
+
 def _validate_location(runner: Runner, location: str) -> None:
     normalized = _normal_region(location)
     if normalized not in EXPRESS_REGIONS:
@@ -815,6 +954,17 @@ def _validate_location(runner: Runner, location: str) -> None:
             break
     if supported and normalized not in supported:
         raise DeployError("Microsoft.App no ofrece Container Apps en esa región. Elige otra región antes de continuar.")
+
+    policy_allowed = _policy_allowed_regions(runner)
+    if policy_allowed is not None and normalized not in policy_allowed:
+        express_available = policy_allowed & EXPRESS_REGIONS & valid
+        if supported:
+            express_available &= supported
+        suggestions = ", ".join(sorted(express_available)) or "ninguna región Express compatible detectada"
+        raise DeployError(
+            f"La política de Azure de la suscripción no permite {location}. "
+            f"Regiones Express permitidas disponibles: {suggestions}. Elige una antes de continuar."
+        )
 
 
 def _check_azure_preflight(
@@ -1271,8 +1421,11 @@ def main() -> int:
     try:
         if not shutil.which("az"):
             raise DeployError("Falta Azure CLI (az). Ejecuta desplegar-azure.bat en Windows con Azure CLI instalada.")
-        if not shutil.which("psql"):
-            raise DeployError("Falta psql. Instala PostgreSQL Command Line Tools; no hace falta un servidor local.")
+        if not _sql_driver():
+            raise DeployError(
+                "Falta un cliente SQL: instala PostgreSQL Command Line Tools (psql), "
+                "o Node.js con las dependencias de backend-nest (`cd backend-nest && npm ci`)."
+            )
         if not (ROOT / "database" / "schema.sql").is_file():
             raise DeployError("No se encontró la raíz del proyecto FashionStore con database/schema.sql.")
 

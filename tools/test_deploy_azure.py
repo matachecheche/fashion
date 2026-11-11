@@ -4,7 +4,10 @@ No Azure, Neon, Stripe, Docker or credentials are contacted by these tests.
 """
 from __future__ import annotations
 
+import base64
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -89,6 +92,99 @@ class NeonBootstrapTests(unittest.TestCase):
         self.assertIn("GRANT app_runtime TO fashionstore_app", sql)
         self.assertNotIn("\\\\getenv", sql)
         self.assertNotIn("Fashion2026!", sql)
+
+    def test_node_pg_sql_fallback_uses_tls_and_parameterizes_role_passwords(self) -> None:
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js no está disponible en este equipo")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            backend = Path(temp_dir) / "backend-nest"
+            pg_dir = backend / "node_modules" / "pg"
+            pg_dir.mkdir(parents=True)
+            log_path = Path(temp_dir) / "pg-log.jsonl"
+            (pg_dir / "index.js").write_text(
+                """const fs = require('node:fs');
+const log = process.env.CLOUD_SQL_TEST_LOG;
+function record(value) { fs.appendFileSync(log, JSON.stringify(value) + '\\n'); }
+class Client {
+  constructor(config) { this.config = config; record({kind:'config', config}); }
+  async connect() {}
+  async query(query, params) {
+    const sql = typeof query === 'string' ? query : query.text;
+    record({kind:'query', sql, params: params || []});
+    if (sql.startsWith('SELECT format(')) return {rows:[{command:\"ALTER ROLE fashionstore_app WITH LOGIN PASSWORD 'quoted-by-server' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS\"}]};
+    if (sql.includes('rolsuper')) return {rows:[{rolsuper:false, rolbypassrls:false}]};
+    if (sql.includes('SELECT valor')) return {rows:[{valor:'10'}]};
+    if (sql.includes('count(*)::text AS count')) return {rows:[{count:'1'}]};
+    if (sql.trim().startsWith('UPDATE')) return {rowCount:1, rows:[]};
+    return {rows:[], rowCount:0};
+  }
+  async end() {}
+}
+module.exports = {Client};
+""",
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env.update({
+                "DATABASE_URL": "postgresql://owner:SYNTHETIC_OWNER_PASSWORD@ep-test.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require",
+                "FS_BACKEND_DIR": str(backend),
+                "CLOUD_SQL_TEST_LOG": str(log_path),
+                "FS_APP_PASSWORD": "Synthetic'AppPassword0123456789ABCDE",
+                "FS_ADMIN_PASSWORD": "Synthetic'AdminPassword-2026",
+            })
+            script = ROOT / "tools" / "cloud_sql.js"
+            result = subprocess.run(
+                [node, str(script), "provision"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.strip(), "PROVISION OK")
+            self.assertNotIn("SYNTHETIC_OWNER_PASSWORD", result.stdout + result.stderr)
+            self.assertNotIn(env["FS_APP_PASSWORD"], result.stdout + result.stderr)
+            self.assertNotIn(env["FS_ADMIN_PASSWORD"], result.stdout + result.stderr)
+
+            records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            config = next(item["config"] for item in records if item.get("kind") == "config")
+            self.assertEqual(config["ssl"], {"rejectUnauthorized": True})
+            self.assertNotIn("sslmode=", config["connectionString"])
+            queries = [item for item in records if item.get("kind") == "query"]
+            role_password_query = next(item for item in queries if item["sql"].startswith("SELECT format("))
+            self.assertEqual(role_password_query["params"], [env["FS_APP_PASSWORD"]])
+            admin_update = next(item for item in queries if item["sql"].startswith("UPDATE public.usuarios SET password_hash"))
+            self.assertEqual(admin_update["params"], [env["FS_ADMIN_PASSWORD"]])
+            self.assertNotIn(env["FS_APP_PASSWORD"], role_password_query["sql"])
+            self.assertNotIn(env["FS_ADMIN_PASSWORD"], admin_update["sql"])
+
+            verified = subprocess.run(
+                [node, str(script), "verify-app"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+            self.assertEqual(verified.stdout.strip(), "VERIFY OK esquema_version=10 cuenta_admin=1")
+
+            sql_file = Path(temp_dir) / "migration file with spaces.sql"
+            sql_file.write_text("SELECT 1; SELECT 2;\n", encoding="utf-8")
+            applied = subprocess.run(
+                [node, str(script), "file", str(sql_file)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(applied.returncode, 0, applied.stdout + applied.stderr)
+            self.assertEqual(applied.stdout.strip(), "SQL OK: migration file with spaces.sql")
+            # The helper sends the whole SQL file to pg in one multi-statement call.
+            updated_records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+            file_queries = [item["sql"] for item in updated_records if item.get("kind") == "query"]
+            self.assertIn("SELECT 1; SELECT 2;\n", file_queries)
 
     def test_nonempty_neon_database_is_refused(self) -> None:
         conn = deploy.parse_neon_connection_url(
@@ -369,6 +465,32 @@ class LocalSafetyRegressionTests(unittest.TestCase):
             self.assertTrue(deploy._wait_http("https://fastapi.example.test/health", attempts=1))
         urlopen.assert_called_once()
 
+    def test_azure_cli_json_parser_tolerates_surrounding_warning(self) -> None:
+        runner = deploy.Runner()
+        output = "WARNING: harmless CLI notice [not-json]\n{\"id\":\"synthetic-subscription\"}\n"
+        with patch.object(runner, "run", return_value=output):
+            self.assertEqual(runner.az_json(["account", "show"]), {"id": "synthetic-subscription"})
+
+    def test_azure_student_allowed_region_policy_is_checked_pre_neon(self) -> None:
+        class PolicyRunner:
+            def az_json(self, args):
+                if args == ["account", "list-locations"]:
+                    return [{"name": name} for name in ("eastus", "brazilsouth", "chilecentral")]
+                if args == ["provider", "show", "--namespace", "Microsoft.App"]:
+                    return {"resourceTypes": [{
+                        "resourceType": "managedEnvironments",
+                        "locations": ["East US", "Brazil South", "Chile Central"],
+                    }]}
+                if args == ["policy", "assignment", "list", "--only-show-errors"]:
+                    return [{"parameters": {"listOfAllowedLocations": {
+                        "value": ["brazilsouth", "chilecentral"],
+                    }}}]
+                raise AssertionError(f"Consulta inesperada: {args}")
+
+        with self.assertRaisesRegex(deploy.DeployError, "brazilsouth, chilecentral"):
+            deploy._validate_location(PolicyRunner(), "eastus")
+        deploy._validate_location(PolicyRunner(), "chilecentral")
+
     def test_runner_redacts_secret_from_command_failure(self) -> None:
         secret = "SyntheticSensitiveValue123"
         runner = deploy.Runner()
@@ -380,11 +502,57 @@ class LocalSafetyRegressionTests(unittest.TestCase):
         self.assertNotIn(secret, str(error.exception))
         self.assertIn("[REDACTED]", str(error.exception))
 
-    def test_bat_signs_in_checks_psql_and_runs_assistant(self) -> None:
+    def test_windows_runner_passes_azure_args_without_cmd_quoting(self) -> None:
+        runner = deploy.Runner()
+        powershell = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        expected_args = [
+            "containerapp", "env", "create", "--location", "East US",
+            "--body", r"@C:\Users\Test User\AppData\Local\Temp\payload.json",
+        ]
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="OK")
+
+        def which(name):
+            return powershell if name == "powershell.exe" else None
+
+        with patch.object(deploy.os, "name", "nt"), patch.object(deploy.shutil, "which", side_effect=which), patch.object(deploy.subprocess, "run", return_value=completed) as run:
+            self.assertEqual(runner.run(["az", *expected_args], quiet=True), "OK")
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], powershell)
+        self.assertIn("-EncodedCommand", command)
+        script = base64.b64decode(command[-1]).decode("utf-16le")
+        self.assertIn("& az @azArgs", script)
+        self.assertEqual(json.loads(run.call_args.kwargs["env"]["FASHIONSTORE_AZ_ARGS_JSON"]), expected_args)
+
+    def test_sql_driver_prefers_psql_and_falls_back_to_installed_node_pg(self) -> None:
+        with patch.object(deploy.shutil, "which", side_effect=lambda name: "psql.exe" if name == "psql" else None), patch.object(deploy, "_node_pg_available", return_value=True):
+            self.assertEqual(deploy._sql_driver(), "psql")
+
+        with patch.object(deploy.shutil, "which", return_value=None), patch.object(deploy, "_node_pg_available", return_value=True):
+            self.assertEqual(deploy._sql_driver(), "node")
+
+        with patch.object(deploy.shutil, "which", return_value=None), patch.object(deploy, "_node_pg_available", return_value=False):
+            self.assertIsNone(deploy._sql_driver())
+
+    def test_node_scalar_fallback_decodes_json_without_psql(self) -> None:
+        connection = deploy.parse_neon_connection_url(
+            _connection_url("postgresql", "owner", "pass", "ep-a.us-east-1.aws.neon.tech", query="sslmode=require")
+        )
+        with patch.object(deploy.shutil, "which", return_value=None), patch.object(deploy, "_cloud_sql", return_value='"empty"') as cloud_sql:
+            self.assertEqual(deploy._psql_value(deploy.Runner(), connection, "SELECT 'empty'"), "empty")
+        cloud_sql.assert_called_once()
+
+    def test_bat_signs_in_checks_sql_driver_and_runs_assistant(self) -> None:
         bat = (ROOT / "desplegar-azure.bat").read_text(encoding="utf-8").lower()
-        self.assertIn("az login", bat)
+        self.assertIn("call az account show --only-show-errors", bat)
+        self.assertIn("call az login", bat)
+        self.assertIn("call az account show --query", bat)
         self.assertIn("where psql", bat)
-        self.assertIn("az extension add --name containerapp --upgrade", bat)
+        self.assertIn("where node", bat)
+        self.assertIn("have_sql_client", bat)
+        self.assertIn("call az extension add --name containerapp --upgrade", bat)
+        self.assertNotIn("\naz account", bat)
+        self.assertNotIn("\naz extension", bat)
         self.assertIn("tools\\deploy_azure.py", bat)
         self.assertNotIn("solo comprueba herramientas", bat)
 

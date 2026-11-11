@@ -679,3 +679,25 @@ No se ejecutó el BAT en Windows ni se autenticó en Azure/Neon; tampoco se cre�
 - La suite local no comprueba cuotas ni facturación. No crear ACR elimina ese registro de Azure pero no garantiza $0 total: Container Apps y egress pueden cobrar fuera de cuotas/créditos. Stripe sigue opcional y en modo test; no hubo compra/webhook vivo.
 
 **Siguiente paso:** subir los cambios a un repo GitHub, ejecutar el workflow, cambiar los tres paquetes a **Public**, confirmar el owner y comprobar sus pulls anónimos. Después se puede ejecutar el BAT localmente: el usuario crea Neon en el navegador y pega la URL en el prompt oculto; solo con confirmación se inicializa Neon y se aprovisiona Azure. Si Neon llega a quedar parcialmente inicializada, no repetir seed sobre la misma base sin inspección.
+
+## 25. Alternativa Node/pg para Neon y robustez de Azure CLI en Windows (2026-11-10)
+
+### Cambios en la automatización
+
+- Se conservó la arquitectura acordada **Azure Container Apps Express + Neon + GHCR público**. La propuesta de App Service F1 del ejemplo no se copió porque cambia el alcance/arquitectura de FashionStore.
+- `desplegar-azure.bat` ya no exige instalar `psql`: lo usa si está disponible; de lo contrario, permite el cliente Node si `node` resuelve el paquete `pg` ya declarado en `backend-nest`. Si faltan las dependencias locales, la instrucción es `cd backend-nest && npm ci`. No se instala ni se modifica un servidor PostgreSQL.
+- `tools/cloud_sql.js` agrega los modos `file`, `scalar`, `provision` y `verify-app`. Usa TLS con validación de certificado para Neon, mantiene URL/contraseñas en el entorno local, hace cambios de contraseña con parámetros y `format(%L)` del servidor (no depende de `Client.escapeLiteral`, que no forma parte de la API de node-postgres) y valida el rol runtime/RLS.
+- El flujo existente conserva `psql` como ruta preferente y usa Node/pg como fallback para preflight de Neon, schema/migraciones/seed, provisión del rol y comprobación de acceso.
+- Se añadió una prueba Windows simulada para el paso de argumentos de Azure CLI por PowerShell/JSON, incluso con rutas y argumentos que contienen espacios; el BAT mantiene `call az` para los shims `az.cmd`.
+- La prueba de la propuesta externa `test_reiniciar_bd_borra_y_resiembra` no mide el comportamiento del despliegue: su bloque `assertRaises(SystemExit)` contiene solo `pass`, así que no ejecuta una acción que pudiera lanzar `SystemExit`.
+
+### Verificación local
+
+- `node --check tools/cloud_sql.js`: PASS.
+- `python -m py_compile tools/deploy_azure.py tools/test_deploy_azure.py`: PASS.
+- Las pruebas simuladas cubren conexión TLS, formato seguro de claves, SQL de varias sentencias y rutas con espacios; no se conectan a Neon ni a Azure.
+- `python -m unittest discover -s tools -p 'test_*.py' -v`: **46/46 PASS**, incluida la suite de empaquetado, la simulación Node/pg sin Neon real y el wrapper PowerShell de Azure CLI simulado con rutas que contienen espacios.
+
+### Límites
+
+El fallback elimina el requisito de instalar `psql` cuando ya están disponibles Node y `backend-nest/node_modules/pg`; no elimina la necesidad de una cuenta Azure autenticada, permisos, imágenes públicas GHCR, Neon nueva/vacía ni confirmación del usuario. No se ejecutó un despliegue real, no se alteró Neon y no se crearon recursos Azure. Windows real sigue pendiente de la prueba del usuario.

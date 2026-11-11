@@ -42,6 +42,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parent
 PG_PORT = 5432
@@ -395,6 +396,21 @@ def ensure_postgres() -> None:
         pass
 
 
+def _needs_generated_local_db_url(database_url: str | None) -> bool:
+    """Use the fresh local fs_app role instead of an empty/example DB URL."""
+    value = str(database_url or "").strip()
+    if not value:
+        return True
+    normalized = value.lower()
+    if any(marker in normalized for marker in ("fs_service:", "postgres:", "replace_me", "replace_with", "change_me", "placeholder")):
+        return True
+    try:
+        username = unquote(urlsplit(value).username or "").strip().lower()
+    except ValueError:
+        username = ""
+    return username in {"user", "username", "your_user", "your_username"}
+
+
 def nest_env() -> dict[str, str]:
     """Variables para NestJS: usa .env si existe; si no, valores de desarrollo locales."""
     env_file = ROOT / "backend-nest" / ".env"
@@ -409,7 +425,7 @@ def nest_env() -> dict[str, str]:
     creds = ROOT / "builds" / ".fs_app_password"
     fs_pass = creds.read_text(encoding="utf-8").strip() if creds.exists() else None
     database_url = values.get("DATABASE_URL")
-    if fs_pass and (not database_url or "fs_service:" in (database_url or "") or "postgres:" in (database_url or "")):
+    if fs_pass and _needs_generated_local_db_url(database_url):
         database_url = f"postgresql://fs_app:{fs_pass}@127.0.0.1:{PG_PORT}/{DB_NAME}"
     simulator_secret = values.get("STRIPE_SIMULATOR_WEBHOOK_SECRET", "").strip()
     if len(simulator_secret) < 32 or any(
@@ -451,7 +467,7 @@ def fastapi_env() -> dict[str, str]:
     creds = ROOT / "builds" / ".fs_app_password"
     fs_pass = creds.read_text(encoding="utf-8").strip() if creds.exists() else None
     db = values.get("DATABASE_URL")
-    if fs_pass and (not db or "fs_service:" in (db or "") or "postgres:" in (db or "")):
+    if fs_pass and _needs_generated_local_db_url(db):
         db = f"postgresql://fs_app:{fs_pass}@127.0.0.1:{PG_PORT}/{DB_NAME}"
     return {
         "APP_ENV": "development",
