@@ -31,7 +31,7 @@ if errorlevel 1 goto LOGIN_ERROR
 echo.
 where psql >nul 2>&1
 if not errorlevel 1 (
-  echo [OK] psql encontrado (solo se necesita el cliente; no un servidor local).
+  echo [OK] psql encontrado. Solo se necesita el cliente, no un servidor local.
   goto HAVE_SQL_CLIENT
 )
 where node >nul 2>&1
@@ -54,9 +54,29 @@ if errorlevel 1 goto NO_PYTHON
 %PYTHON% -c "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 1)"
 if errorlevel 1 goto PYTHON_TOO_OLD
 
-echo Instalando o actualizando la extension oficial containerapp de Azure CLI...
-call az extension add --name containerapp --upgrade
+echo Version de Azure CLI instalada:
+call az version --output json
+echo.
+where az | findstr /I /C:"Program Files (x86)" >nul
+if errorlevel 1 goto CLI_64
+echo [AVISO] Tienes Azure CLI de 32 bits, carpeta Program Files x86. Sus extensiones pueden fallar
+echo al instalarse con el error maturin o pip. Si ocurre, instala la version de 64 bits:
+echo https://aka.ms/installazurecliwindowsx64
+echo.
+:CLI_64
+call az extension show --name containerapp --only-show-errors --output none >nul 2>&1
+if not errorlevel 1 goto EXT_PRESENT
+echo Instalando la extension oficial containerapp de Azure CLI...
+call az extension add --name containerapp --yes
 if errorlevel 1 goto EXTENSION_ERROR
+goto EXT_DONE
+
+:EXT_PRESENT
+echo [OK] La extension containerapp ya esta instalada. Se intenta actualizar sin detener el flujo.
+call az extension update --name containerapp --only-show-errors >nul 2>&1
+call az extension show --name containerapp --query version --output tsv
+
+:EXT_DONE
 
 echo.
 echo Docker local no es necesario: las imagenes publicas GHCR las compila GitHub Actions.
@@ -107,5 +127,15 @@ exit /b 2
 
 :EXTENSION_ERROR
 echo [ERROR] No se pudo instalar la extension containerapp de Azure CLI.
+echo Guardando el registro detallado en builds\az-extension-debug.txt
+if not exist builds mkdir builds
+call az extension add --name containerapp --yes --debug > builds\az-extension-debug.txt 2>&1
+echo ---- ultimas lineas del registro ----
+powershell -NoProfile -Command "Get-Content -LiteralPath 'builds\az-extension-debug.txt' -Tail 30"
+echo -------------------------------------
+echo Si el registro menciona maturin, casi seguro usas Azure CLI de 32 bits.
+echo Desinstala Microsoft Azure CLI 32 bits e instala la de 64 bits: https://aka.ms/installazurecliwindowsx64
+echo Otras causas: Azure CLI desactualizado, proxy, VPN o antivirus que bloquean pip, o falta de espacio.
+echo Si sigue fallando, copia las lineas de arriba para diagnosticarlo.
 pause
 exit /b 2

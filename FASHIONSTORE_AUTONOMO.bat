@@ -34,7 +34,7 @@ where python >nul 2>&1 && set "PY_CMD=python"
 if "%PY_CMD%"=="" (where py >nul 2>&1 && set "PY_CMD=py -3")
 if "%PY_CMD%"=="" (
   echo [ERROR] Python 3.10+ no esta instalado o no esta en el PATH.
-  echo Instala Python desde https://www.python.org/downloads/ (marca "Add to PATH").
+  echo Instala Python desde https://www.python.org/downloads/ y marca "Add to PATH".
   exit /b 3
 )
 echo   OK: %PY_CMD%

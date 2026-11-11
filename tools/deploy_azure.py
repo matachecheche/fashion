@@ -930,6 +930,29 @@ def _policy_allowed_regions(runner: Runner) -> set[str] | None:
     return set.intersection(*allowlists)
 
 
+# Regiones preferidas (más cercanas a Bolivia primero) cuando la política limita las permitidas.
+REGION_PREFERENCE = ("chilecentral", "brazilsouth", "mexicocentral", "canadacentral", "francecentral")
+
+
+def _default_region(runner: Runner) -> tuple[str, list[str]]:
+    """Elige una región por defecto compatible con Express y con la política de la suscripción.
+
+    Devuelve (región_por_defecto, regiones_permitidas_ordenadas). Si no hay política o no se
+    puede leer, conserva eastus; la validación posterior sigue siendo la que decide.
+    """
+    try:
+        allowed = _policy_allowed_regions(runner)
+    except Exception:
+        allowed = None
+    if not allowed:
+        return "eastus", []
+    usable = sorted(allowed & EXPRESS_REGIONS)
+    if not usable:
+        return "eastus", []
+    ordered = [r for r in REGION_PREFERENCE if r in usable] + [r for r in usable if r not in REGION_PREFERENCE]
+    return ordered[0], ordered
+
+
 def _validate_location(runner: Runner, location: str) -> None:
     normalized = _normal_region(location)
     if normalized not in EXPRESS_REGIONS:
@@ -967,6 +990,13 @@ def _validate_location(runner: Runner, location: str) -> None:
         )
 
 
+def _parse_bool_output(output: str) -> str:
+    """Devuelve 'true' o 'false' ignorando avisos que Azure CLI mezcla en la salida."""
+    values = [line.strip().strip('"').lower() for line in str(output or "").splitlines()]
+    values = [value for value in values if value in {"true", "false"}]
+    return values[-1] if values else ""
+
+
 def _check_azure_preflight(
     runner: Runner,
     subscription_id: str,
@@ -980,14 +1010,19 @@ def _check_azure_preflight(
         raise DeployError("La suscripción activa cambió; vuelve a iniciar el BAT y selecciona la correcta.")
     _validate_location(runner, location)
 
-    exists = runner.run(
+    raw_exists = runner.run(
         ["az", "group", "exists", "--name", names["resource_group"], "--output", "tsv"],
         quiet=True,
-    ).strip().lower()
+    )
+    exists = _parse_bool_output(raw_exists)
     if exists == "true":
         raise DeployError(f"El Resource Group generado ya existe ({names['resource_group']}); no se modifican recursos existentes.")
     if exists != "false":
-        raise DeployError("No se pudo confirmar que el Resource Group generado no exista.")
+        detail = raw_exists.strip()[-1500:] or "(sin salida)"
+        raise DeployError(
+            "No se pudo confirmar que el Resource Group generado no exista. "
+            f"Salida de az group exists:\n{detail}"
+        )
 
 
 def _ensure_providers_registered(runner: Runner) -> None:
@@ -1002,6 +1037,16 @@ def _ensure_providers_registered(runner: Runner) -> None:
 
 def _resource_group_state(state: dict) -> None:
     _save_state(state)
+
+
+_CLI_NOISE_PREFIXES = ("warning", "the installed extension", "this command", "command group", "az :", "at line:", "+ ")
+
+
+def _tsv_value(output: str) -> str:
+    """Último valor útil de una salida tsv, ignorando avisos de Azure CLI (extensión en preview, etc.)."""
+    lines = [line.strip() for line in str(output or "").splitlines()]
+    lines = [line for line in lines if line and not line.lower().startswith(_CLI_NOISE_PREFIXES)]
+    return lines[-1] if lines else ""
 
 
 def _wait_containerapp(runner: Runner, name: str, resource_group: str, *, attempts: int = 60) -> None:
@@ -1023,7 +1068,8 @@ def _wait_containerapp(runner: Runner, name: str, resource_group: str, *, attemp
                     "tsv",
                 ],
                 quiet=True,
-            ).strip()
+            )
+            last_state = _tsv_value(last_state)
         except DeployError:
             last_state = ""
         if last_state.lower() == "succeeded":
@@ -1050,7 +1096,8 @@ def _fqdn(runner: Runner, app: str, resource_group: str) -> str:
             "tsv",
         ],
         quiet=True,
-    ).strip()
+    )
+    value = _tsv_value(value)
     if not value or value.lower() == "none":
         raise DeployError(f"Azure todavía no devolvió el FQDN de {app}.")
     return value
@@ -1160,7 +1207,8 @@ def _create_azure(
             "tsv",
         ],
         quiet=True,
-    ).strip()
+    )
+    environment_id = _tsv_value(environment_id)
     if not environment_id:
         raise DeployError("Azure no devolvió el ID del Container Apps Environment.")
 
@@ -1442,7 +1490,10 @@ def main() -> int:
             raise DeployError("Cancelado antes de abrir Neon o cambiar la suscripción/recursos.")
 
         subscription_id, subscription_name = _subscription(runner)
-        location = input("Región Azure (nombre corto) [eastus]: ").strip() or "eastus"
+        default_region, allowed_regions = _default_region(runner)
+        if allowed_regions:
+            print("Tu suscripción solo permite estas regiones compatibles con Express: " + ", ".join(allowed_regions))
+        location = input(f"Región Azure (nombre corto) [{default_region}]: ").strip() or default_region
         ghcr_owner = normalize_ghcr_owner(input("Owner de GitHub que publica los paquetes públicos GHCR: "))
         names = _resource_names()
         state.update({**names, "subscription_id": subscription_id, "subscription_name": subscription_name, "location": location, "ghcr_owner": ghcr_owner})

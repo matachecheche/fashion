@@ -95,7 +95,7 @@ if not exist "%APK_DEST%" (
 
 for %%A in ("%APK_DEST%") do set APK_SIZE=%%~zA
 if "%APK_SIZE%"=="0" (
-  echo [ERROR] El APK descargado esta vacio (0 bytes). Eliminando...
+  echo [ERROR] El APK descargado esta vacio, 0 bytes. Eliminando...
   del /f /q "%APK_DEST%"
   exit /b 12
 )

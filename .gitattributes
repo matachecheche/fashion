@@ -1,0 +1,3 @@
+# Los .bat deben ir con CRLF: con LF solo, cmd.exe puede ejecutar lineas cortadas.
+*.bat text eol=crlf
+*.cmd text eol=crlf

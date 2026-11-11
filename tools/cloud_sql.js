@@ -88,7 +88,7 @@ async function provision(client) {
     // PostgreSQL utility statements no admiten parámetros bind. Pide al servidor que
     // genere el literal SQL con format(%L); no se concatena ni escapa la clave en JS.
     const passwordSql = await client.query(
-      "SELECT format('ALTER ROLE fashionstore_app WITH LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS', $1) AS command",
+      "SELECT format('ALTER ROLE fashionstore_app WITH LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS', $1::text) AS command",
       [appPassword]
     );
     if (!passwordSql.rows[0] || !passwordSql.rows[0].command) {
@@ -102,7 +102,7 @@ async function provision(client) {
     if (adminPassword) {
       await client.query("SELECT set_config('app.tenant_id', 'legacy', true)");
       const result = await client.query(
-        "UPDATE public.usuarios SET password_hash = crypt($1, gen_salt('bf', 12)) " +
+        "UPDATE public.usuarios SET password_hash = crypt($1::text, gen_salt('bf', 12)) " +
         "WHERE tenant_id = 'legacy' AND email = 'admin@fashionstore.bo'",
         [adminPassword]
       );

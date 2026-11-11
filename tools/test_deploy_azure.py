@@ -550,7 +550,7 @@ class LocalSafetyRegressionTests(unittest.TestCase):
         self.assertIn("where psql", bat)
         self.assertIn("where node", bat)
         self.assertIn("have_sql_client", bat)
-        self.assertIn("call az extension add --name containerapp --upgrade", bat)
+        self.assertIn("call az extension add --name containerapp --yes", bat)
         self.assertNotIn("\naz account", bat)
         self.assertNotIn("\naz extension", bat)
         self.assertIn("tools\\deploy_azure.py", bat)
@@ -613,6 +613,84 @@ class LocalSafetyRegressionTests(unittest.TestCase):
         self.assertIn("proxy_ssl_verify on;", azure_nginx)
         self.assertIn("proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;", azure_nginx)
         self.assertIn("API_UPSTREAM", deploy_script)
+
+
+class CloudSqlRealServerRegressionTests(unittest.TestCase):
+    """El stub de pg de los tests no detecta errores de tipos de PostgreSQL real."""
+
+    def test_provision_casts_bind_parameters_for_postgres(self):
+        source = (ROOT / "tools" / "cloud_sql.js").read_text(encoding="utf-8")
+        # format(..., $1) usa VARIADIC "any": sin cast PostgreSQL responde
+        # "could not determine data type of parameter $1" y el despliegue se detiene.
+        self.assertIn("NOBYPASSRLS', $1::text)", source)
+        self.assertIn("crypt($1::text, gen_salt('bf', 12))", source)
+
+
+class BatSyntaxRegressionTests(unittest.TestCase):
+    def test_no_unescaped_parentheses_in_echo_inside_blocks(self):
+        # Un ")" dentro de un echo en un bloque if (...) cierra el bloque y CMD responde
+        # "No se esperaba . en este momento."
+        problems = []
+        for path in sorted(ROOT.rglob("*.bat")):
+            if "node_modules" in path.parts:
+                continue
+            depth = 0
+            for number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                stripped = line.strip()
+                if stripped.startswith(")"):
+                    depth = max(0, depth - 1)
+                if depth > 0 and stripped.lower().startswith("echo") and any(ch in stripped for ch in "()"):
+                    problems.append("%s:%d %s" % (path.relative_to(ROOT), number, stripped))
+                if stripped.endswith("("):
+                    depth += 1
+        self.assertEqual(problems, [])
+
+
+class BatLineEndingsTests(unittest.TestCase):
+    def test_all_bat_files_use_crlf(self):
+        # cmd.exe con finales LF puede reanudar tras un CALL en mitad de una linea
+        # ("sion-debug.txt' no se reconoce como un comando").
+        bad = []
+        for path in sorted(ROOT.rglob("*.bat")):
+            if "node_modules" in path.parts:
+                continue
+            data = path.read_bytes()
+            if data.count(b"\n") != data.count(b"\r\n"):
+                bad.append(str(path.relative_to(ROOT)))
+        self.assertEqual(bad, [])
+        self.assertIn("*.bat text eol=crlf", (ROOT / ".gitattributes").read_text(encoding="utf-8"))
+
+
+class DefaultRegionTests(unittest.TestCase):
+    def test_default_region_respects_student_policy(self):
+        with patch.object(deploy, "_policy_allowed_regions",
+                          return_value={"brazilsouth", "canadacentral", "chilecentral", "francecentral", "mexicocentral", "westus9"}):
+            region, allowed = deploy._default_region(object())
+        self.assertEqual(region, "chilecentral")
+        self.assertEqual(allowed, ["chilecentral", "brazilsouth", "mexicocentral", "canadacentral", "francecentral"])
+
+    def test_default_region_without_policy_keeps_eastus(self):
+        with patch.object(deploy, "_policy_allowed_regions", return_value=None):
+            self.assertEqual(deploy._default_region(object()), ("eastus", []))
+        with patch.object(deploy, "_policy_allowed_regions", side_effect=deploy.DeployError("x")):
+            self.assertEqual(deploy._default_region(object()), ("eastus", []))
+
+
+class BoolOutputParsingTests(unittest.TestCase):
+    def test_parse_bool_ignores_cli_warnings(self):
+        self.assertEqual(deploy._parse_bool_output("false"), "false")
+        self.assertEqual(deploy._parse_bool_output("False\r\n"), "false")
+        self.assertEqual(deploy._parse_bool_output("WARNING: The installed extension 'containerapp' is in preview.\nfalse\n"), "false")
+        self.assertEqual(deploy._parse_bool_output("true"), "true")
+        self.assertEqual(deploy._parse_bool_output("algo raro"), "")
+
+
+class TsvNoiseTests(unittest.TestCase):
+    def test_tsv_value_ignores_extension_preview_warning(self):
+        noisy = "The installed extension 'containerapp' is in preview.\nfashionstore-api-abc.chilecentral.azurecontainerapps.io\n"
+        self.assertEqual(deploy._tsv_value(noisy), "fashionstore-api-abc.chilecentral.azurecontainerapps.io")
+        self.assertEqual(deploy._tsv_value("WARNING: x\nSucceeded"), "Succeeded")
+        self.assertEqual(deploy._tsv_value("The installed extension 'containerapp' is in preview."), "")
 
 
 if __name__ == "__main__":

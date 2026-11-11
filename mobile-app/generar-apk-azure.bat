@@ -27,7 +27,7 @@ set "API_URL=%API_URL%"
 
 echo %API_URL% | findstr /I /R "^https://" >nul
 if errorlevel 1 (
-  echo [ERROR] La URL debe ser HTTPS (ej: https://...azurecontainerapps.io). No uses http ni IP.
+  echo [ERROR] La URL debe ser HTTPS, por ejemplo https://...azurecontainerapps.io. No uses http ni IP.
   exit /b 2
 )
 
@@ -41,7 +41,7 @@ if /I "!API_URL:~-4!"=="/api" (
 echo ==^> Comprobando salud de la API: %HEALTH_URL%
 powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri '%HEALTH_URL%' -UseBasicParsing -TimeoutSec 20; if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 300) { Write-Host 'API SALUDABLE (HTTP ' $r.StatusCode ')'; exit 0 } else { Write-Host 'API respondio HTTP ' $r.StatusCode; exit 1 } } catch { Write-Host ('API NO SALUDABLE: ' + $_.Exception.Message); exit 1 }"
 if errorlevel 1 (
-  echo [ERROR] La API no responde correctamente en Azure. Despliega primero (desplegar-azure.bat) y vuelve a intentar.
+  echo [ERROR] La API no responde correctamente en Azure. Despliega primero con desplegar-azure.bat y vuelve a intentar.
   exit /b 3
 )
 
