@@ -126,6 +126,186 @@ class AzureResourceGroupPreflightTests(unittest.TestCase):
         with self.assertRaisesRegex(deploy.DeployError, "no pudo verificar"):
             deploy._resource_group_exists(FakeRunner(), "sub", "new-rg")
 
+    def test_failed_attempt_cleanup_only_targets_the_run_resource_group(self) -> None:
+        class FakeRunner:
+            def __init__(self):
+                self.calls = []
+            def az_quiet(self, args):
+                self.calls.append(list(args))
+
+        runner = FakeRunner()
+        state = {
+            "status": "incomplete", "resource_group_created": True,
+            "resource_group": "rg-fashionstore-test-new", "subscription_id": "sub-id",
+            "environment_reused": True,
+        }
+        with patch.object(deploy.sys, "argv", ["deploy_azure.py"]), patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(deploy._cleanup_failed_resource_group(runner, state))
+        self.assertEqual(runner.calls, [[
+            "group", "delete", "--name", "rg-fashionstore-test-new", "--yes", "--subscription", "sub-id",
+        ]])
+        self.assertTrue(state["resource_group_deleted"])
+        self.assertEqual(state["azure_cleanup_status"], "completed")
+
+    def test_failed_attempt_cleanup_can_be_disabled_for_debugging(self) -> None:
+        class FakeRunner:
+            def az_quiet(self, args):
+                raise AssertionError("No debe eliminar recursos si el usuario solicita conservarlos")
+
+        state = {"status": "incomplete", "resource_group_created": True, "resource_group": "rg-debug"}
+        with patch.object(deploy.sys, "argv", ["deploy_azure.py", "--keep-failed-resources"]):
+            self.assertFalse(deploy._cleanup_failed_resource_group(FakeRunner(), state))
+        self.assertEqual(state["azure_cleanup_status"], "kept_by_user")
+
+
+class InteractiveRetryTests(unittest.TestCase):
+    def test_yes_no_prompt_retries_typo(self):
+        with patch("builtins.input", side_effect=["siii", "s"]):
+            self.assertTrue(deploy._prompt_yes_no("¿Continuar?", default=False))
+
+    def test_exact_confirmation_retries_typo_and_supports_cancel(self):
+        with patch("builtins.input", side_effect=["CONTINUAR ", "CONTINUR", "CONTINUAR"]):
+            self.assertTrue(deploy._prompt_exact_confirmation("Escribe: ", "CONTINUAR", purpose="probar"))
+        with patch("builtins.input", return_value="CANCELAR"):
+            self.assertFalse(deploy._prompt_exact_confirmation("Escribe: ", "DEPLOY-TEST", purpose="probar"))
+
+    def test_region_prompt_retries_invalid_region(self):
+        class RegionRunner:
+            def __init__(self):
+                self.validated = []
+            def az_json(self, args):
+                if args == ["account", "list-locations"]:
+                    return [{"name": "chilecentral"}, {"name": "brazilsouth"}]
+                if args == ["provider", "show", "--namespace", "Microsoft.App"]:
+                    return {"resourceTypes": [{"resourceType": "managedEnvironments", "locations": ["Chile Central", "Brazil South"]}]}
+                if args == ["policy", "assignment", "list", "--only-show-errors"]:
+                    return [{"parameters": {"listOfAllowedLocations": {"value": ["chilecentral", "brazilsouth"]}}}]
+                raise AssertionError(args)
+
+        with patch("builtins.input", side_effect=["chile-central-typo", "brazilsouth"]):
+            self.assertEqual(deploy._prompt_region(RegionRunner(), "Región: ", "chilecentral", allowed_regions=["chilecentral", "brazilsouth"]), "brazilsouth")
+
+    def test_neon_connection_prompt_retries_malformed_url_without_echoing_it(self):
+        valid_url = _connection_url(
+            "postgresql", "owner", "synthetic-password", "ep-test.us-east-1.aws.neon.tech", query="sslmode=require"
+        )
+        with patch.object(deploy.getpass, "getpass", side_effect=["not-a-postgresql-url", valid_url]):
+            connection = deploy._prompt_neon_connection()
+        self.assertEqual(connection.username, "owner")
+        self.assertEqual(connection.database, "db")
+
+
+    def test_neon_authentication_error_allows_reentering_connection(self):
+        first = deploy.parse_neon_connection_url(
+            _connection_url("postgresql", "owner", "wrong-password", "ep-test.us-east-1.aws.neon.tech", query="sslmode=require")
+        )
+        second = deploy.parse_neon_connection_url(
+            _connection_url("postgresql", "owner", "correct-password", "ep-test.us-east-1.aws.neon.tech", query="sslmode=require")
+        )
+        with patch.object(deploy, "_prompt_neon_connection", side_effect=[first, second]) as prompt, patch.object(
+            deploy, "preflight_neon", side_effect=[deploy.DeployError("FATAL: password authentication failed for user owner"), "fashionstore"]
+        ):
+            connection, state = deploy._prompt_and_preflight_neon(deploy.Runner())
+        self.assertIs(connection, second)
+        self.assertEqual(state, "fashionstore")
+        self.assertEqual(prompt.call_count, 2)
+
+    def test_neon_unknown_foreign_database_is_not_misclassified_as_typo(self):
+        self.assertFalse(deploy._is_retryable_neon_connection_error(
+            deploy.DeployError("La base Neon contiene tablas que no se reconocen como FashionStore")
+        ))
+
+
+class ExpressEnvironmentReuseTests(unittest.TestCase):
+    def test_list_express_environments_filters_region_and_mode(self):
+        express_id = "/subscriptions/sub/resourceGroups/rg-old/providers/Microsoft.App/managedEnvironments/env-express"
+        class FakeRunner:
+            def az_json(self, args):
+                self.args = args
+                return [
+                    {"id": express_id, "name": "env-express", "location": "Chile Central",
+                     "properties": {"environmentMode": "Express", "provisioningState": "Succeeded"}},
+                    {"id": "/subscriptions/sub/resourceGroups/rg-managed/providers/Microsoft.App/managedEnvironments/env-managed",
+                     "name": "env-managed", "location": "chilecentral",
+                     "properties": {"environmentMode": "WorkloadProfiles", "provisioningState": "Succeeded"}},
+                    {"id": "/subscriptions/sub/resourceGroups/rg-other/providers/Microsoft.App/managedEnvironments/env-brazil",
+                     "name": "env-brazil", "location": "brazilsouth",
+                     "properties": {"environmentMode": "Express", "provisioningState": "Succeeded"}},
+                ]
+        runner = FakeRunner()
+        environments = deploy._list_express_environments(runner, "sub", "chilecentral")
+        self.assertEqual(len(environments), 1)
+        self.assertEqual(environments[0]["id"], express_id)
+        self.assertEqual(environments[0]["resource_group"], "rg-old")
+        self.assertEqual(runner.args[:4], ["containerapp", "env", "list", "--subscription"])
+
+    def test_list_express_environments_uses_arm_when_cli_list_omits_mode(self):
+        express_id = "/subscriptions/sub/resourceGroups/rg-existing/providers/Microsoft.App/managedEnvironments/env-express"
+        class FakeRunner:
+            def __init__(self):
+                self.calls = []
+            def az_json(self, args):
+                self.calls.append(args)
+                if args[0:3] == ["containerapp", "env", "list"]:
+                    return [{"id": express_id, "name": "env-express", "location": "chilecentral", "properties": {}}]
+                if args[0:2] == ["rest", "--method"]:
+                    return {"properties": {"environmentMode": "Express", "provisioningState": "Succeeded"}}
+                raise AssertionError(args)
+        runner = FakeRunner()
+        result = deploy._list_express_environments(runner, "sub", "chilecentral")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["name"], "env-express")
+        self.assertEqual(result[0]["resource_group"], "rg-existing")
+        self.assertEqual(len(runner.calls), 2)
+        self.assertIn("api-version=2025-07-01", runner.calls[1][-1])
+
+    def test_existing_environment_selection_retries_bad_choice(self):
+        env = {"id": "/subscriptions/sub/resourceGroups/rg-old/providers/Microsoft.App/managedEnvironments/env-old",
+              "name": "env-old", "resource_group": "rg-old", "location": "chilecentral", "provisioning_state": "succeeded"}
+        with patch.object(deploy, "_list_express_environments", return_value=[env]), patch(
+            "builtins.input", side_effect=["oops", "1"]
+        ):
+            location, selected = deploy._choose_express_environment(object(), "sub", "chilecentral", ["chilecentral", "brazilsouth"])
+        self.assertEqual(location, "chilecentral")
+        self.assertEqual(selected, env)
+
+    def test_regional_express_quota_error_retries_in_another_allowed_region(self):
+        class FakeRunner:
+            def __init__(self):
+                self.create_calls = []
+                self.first = True
+            def az_quiet(self, args):
+                self.create_calls.append(list(args))
+                if self.first:
+                    self.first = False
+                    raise deploy.DeployError("MaxNumberOfRegionalExpressEnvironmentsInSubExceeded")
+            def run(self, args, quiet=False):
+                return "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/managedEnvironments/env-new"
+
+        runner = FakeRunner()
+        state = {"resource_group": "rg", "status": "in_progress"}
+        with patch.object(deploy, "_list_express_environments", return_value=[]), patch.object(
+            deploy, "_prompt_region", return_value="brazilsouth"
+        ), patch.object(deploy, "_choose_express_environment", return_value=("brazilsouth", None)), patch.object(
+            deploy, "_resource_group_state"
+        ):
+            env_id, location, env_name = deploy._create_or_reuse_express_environment(
+                runner,
+                subscription_id="sub",
+                resource_group="rg",
+                environment_name="env-new",
+                location="chilecentral",
+                allowed_regions=["chilecentral", "brazilsouth"],
+                existing_environment=None,
+                state=state,
+            )
+        self.assertEqual(location, "brazilsouth")
+        self.assertEqual(env_name, "env-new")
+        self.assertIn("managedEnvironments/env-new", env_id)
+        self.assertEqual(len(runner.create_calls), 2)
+        self.assertIn("chilecentral", runner.create_calls[0])
+        self.assertIn("brazilsouth", runner.create_calls[1])
+
     def test_deployment_state_history_keeps_metadata_but_never_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             with patch.object(deploy, "BUILD_STATE", Path(temp_dir) / "state.json"), patch.object(deploy, "BUILD_HISTORY", Path(temp_dir) / "history.json"):
@@ -148,6 +328,34 @@ class AzureResourceGroupPreflightTests(unittest.TestCase):
 
 
 class NeonBootstrapTests(unittest.TestCase):
+    def test_reusing_prepared_neon_skips_schema_migrations_and_seed(self) -> None:
+        owner = deploy.parse_neon_connection_url(
+            _connection_url("postgresql", "owner", "password", "ep-test.us-east-1.aws.neon.tech", query="sslmode=require")
+        )
+        runner = deploy.Runner()
+        report = {
+            "tables": 48,
+            "rows": 347,
+            "demo_users_active_and_password_verified": 5,
+            "table_row_counts": {"usuarios": 5},
+        }
+        with patch.object(deploy, "_neon_state", return_value="fashionstore"), patch.object(
+            deploy.shutil, "which", return_value="/usr/bin/psql"
+        ), patch.object(deploy, "_psql", side_effect=["", "5"]) as psql, patch.object(
+            deploy, "verify_restored_data", return_value=report
+        ):
+            runtime_url, runtime_password, verified_report = deploy.prepare_neon_database(
+                runner, owner, reuse_existing=True, app_password="SYNTHETIC_RUNTIME_PASSWORD"
+            )
+        self.assertEqual(verified_report["tables"], 48)
+        self.assertEqual(verified_report["demo_users_active_and_password_verified"], 5)
+        self.assertEqual(runtime_password, "SYNTHETIC_RUNTIME_PASSWORD")
+        self.assertIn("fashionstore_app", runtime_url)
+        # The only two psql calls are runtime-role provisioning and the read-only
+        # access check; schema.sql, migrations and seed.sql are not re-applied.
+        self.assertEqual(psql.call_count, 2)
+        self.assertIn("FASHIONSTORE_APP_PASSWORD", psql.call_args_list[0].kwargs["extra_env"])
+
     def test_bootstrap_only_provisions_runtime_role_and_never_mutates_demo_users(self) -> None:
         sql = deploy.build_database_bootstrap_sql()
         self.assertTrue(sql.startswith("BEGIN;\n\\getenv app_password FASHIONSTORE_APP_PASSWORD"))
@@ -316,6 +524,16 @@ module.exports = {Client};
 
 
 class GHCRImageTests(unittest.TestCase):
+    def test_package_owner_typo_can_be_corrected_without_restarting_assistant(self):
+        fake_images = {"ai": "ghcr.io/owner/fashionstore-ai:latest"}
+        with patch.object(deploy, "check_public_ghcr_images", side_effect=[
+            deploy.DeployError("La imagen wrong/fashionstore-ai:latest no existe o no es pública."),
+            fake_images,
+        ]), patch("builtins.input", side_effect=["correct-owner"]):
+            owner, images = deploy._check_ghcr_images_with_retry("wrong")
+        self.assertEqual(owner, "correct-owner")
+        self.assertEqual(images, fake_images)
+
     class Response:
         def __init__(self, body: bytes, status: int = 200) -> None:
             self.body = body
@@ -476,6 +694,13 @@ class AzurePayloadTests(unittest.TestCase):
         gemini_key = "AQ.Ab8RN6KzvT-" + "y" * 32
         with patch("builtins.input", side_effect=["s", "s"]), patch.object(deploy.getpass, "getpass", side_effect=[groq_key, gemini_key]):
             self.assertEqual(deploy._read_optional_llm_credentials(), {"groq": groq_key, "gemini": gemini_key})
+
+    def test_invalid_ai_key_can_be_corrected_without_aborting(self) -> None:
+        groq_key = "gsk_" + "x" * 32
+        with patch("builtins.input", side_effect=["s", "n"]), patch.object(
+            deploy.getpass, "getpass", side_effect=["not-a-real-key", groq_key]
+        ):
+            self.assertEqual(deploy._read_optional_llm_credentials(), {"groq": groq_key})
 
     def test_payload_uses_public_image_without_paid_azure_registry_or_identity(self) -> None:
         payload = self.make_payload()
@@ -696,16 +921,18 @@ class LocalSafetyRegressionTests(unittest.TestCase):
             main_source.index("_check_azure_preflight(runner, subscription_id, location, names)"),
         )
         self.assertNotIn("Microsoft.OperationalInsights", source)
-        self.assertIn('"--environment-mode",\n            "express"', source)
-        self.assertIn('"--logs-destination",\n            "none"', source)
+        self.assertIn('"--environment-mode", "express"', source)
+        self.assertIn('"--logs-destination", "none"', source)
         self.assertIn('"container_apps_mode": "express"', source)
+        self.assertIn("_list_express_environments", source)
+        self.assertIn("MaxNumberOfRegionalExpressEnvironmentsInSubExceeded", source)
         self.assertNotIn("az acr", source.lower())
 
     def test_ghcr_requires_explicit_confirmation_before_side_effects(self) -> None:
         source = (ROOT / "tools" / "deploy_azure.py").read_text(encoding="utf-8")
         main_source = source[source.index("def main() -> int:"):]
         self.assertLess(
-            main_source.index('provider_confirmation = input("¿Confirmas usar GHCR'),
+            main_source.index('_prompt_yes_no("¿Confirmas usar GHCR'),
             main_source.index("_subscription(runner,"),
         )
         self.assertIn("GHCR no confirmado", main_source)

@@ -67,6 +67,11 @@ class DeployError(RuntimeError):
     """Expected, user-actionable failure in the assisted deploy."""
 
 
+YES_VALUES = {"s", "si", "sí", "y", "yes"}
+NO_VALUES = {"n", "no"}
+CANCEL_VALUES = {"cancelar", "cancel", "salir"}
+
+
 @dataclass(frozen=True)
 class NeonConnection:
     original_url: str
@@ -250,7 +255,10 @@ class Runner:
         return _json_from_cli_output(output)
 
     def az_quiet(self, args: Sequence[str]) -> None:
-        self.run(["az", *args, "--output", "none"], quiet=True)
+        # Azure CLI emits preview/Breaking Change warnings to stderr even when a
+        # command succeeds. Suppress those notices so PowerShell does not wrap them
+        # as CLIXML ErrorRecords on Windows; real errors remain visible.
+        self.run(["az", *args, "--only-show-errors", "--output", "none"], quiet=True)
 
 
 def _psql_env(connection: NeonConnection) -> dict[str, str]:
@@ -415,8 +423,127 @@ def preflight_neon(runner: Runner, connection: NeonConnection) -> str:
         print("Conexión Neon correcta; la base está vacía y lista para preparar.")
     else:
         print("Conexión Neon correcta; se detectó una instalación FashionStore existente.")
-        print("La restauración borrará los datos actuales de esa base y volverá a cargar el seed local.")
+        print("Podrás reutilizar sus datos actuales o, si confirmas expresamente, restaurar la demo desde cero.")
     return state
+
+
+def _prompt_yes_no(prompt: str, *, default: bool = False) -> bool:
+    """Keep prompting after a typo; only an explicit S/N decision is accepted."""
+    while True:
+        answer = input(prompt).strip().casefold()
+        if not answer:
+            return default
+        if answer in YES_VALUES:
+            return True
+        if answer in NO_VALUES:
+            return False
+        print("Respuesta no reconocida. Escribe S para sí o N para no; puedes intentarlo nuevamente.")
+
+
+def _prompt_exact_confirmation(prompt: str, expected: str, *, purpose: str) -> bool:
+    """Retry a mistyped safety token rather than aborting on the first typo."""
+    while True:
+        answer = input(prompt).strip()
+        if answer == expected:
+            return True
+        if answer.casefold() in CANCEL_VALUES:
+            return False
+        print(f"El texto no coincide. Vuelve a escribir {expected} para {purpose}, o escribe CANCELAR para salir.")
+
+
+def _prompt_neon_connection() -> NeonConnection:
+    """Ask again when the user pastes a malformed Neon URL; never echo the URL."""
+    while True:
+        raw = getpass.getpass("Pega la URL directa owner de Neon (entrada oculta; Enter para cancelar): ").strip()
+        if not raw:
+            raise DeployError("No se recibió una URL de Neon; no se modificó la base.")
+        try:
+            return parse_neon_connection_url(raw)
+        except DeployError as exc:
+            print(f"[DATO INVÁLIDO] {exc}")
+            print("Vuelve a pegar la URL completa de Neon. La URL no se mostrará en pantalla.")
+
+def _is_retryable_neon_connection_error(error: Exception) -> bool:
+    """Recognize errors commonly caused by a mistyped Neon URL/user/password/database."""
+    message = str(error).casefold()
+    markers = (
+        "password authentication failed",
+        "authentication failed",
+        "could not connect to server",
+        "connection refused",
+        "connection timed out",
+        "timeout expired",
+        "could not translate host name",
+        "name or service not known",
+        "getaddrinfo failed",
+        'database "',
+        "does not exist",
+        'role "',
+        "no pg_hba.conf entry",
+        "permission denied for database",
+        "connection reset by peer",
+        "server closed the connection unexpectedly",
+        "ssl syscall",
+    )
+    return any(marker in message for marker in markers)
+
+
+def _prompt_and_preflight_neon(runner: Runner) -> tuple[NeonConnection, str]:
+    """Let the user re-enter Neon credentials if the connection preflight fails."""
+    while True:
+        owner = _prompt_neon_connection()
+        runner.add_sensitive(owner.original_url, owner.password)
+        try:
+            return owner, preflight_neon(runner, owner)
+        except DeployError as exc:
+            if not _is_retryable_neon_connection_error(exc):
+                raise
+            print("[CONEXIÓN NEON NO VÁLIDA] No se pudo autenticar o abrir la base con esos datos.")
+            print("Revisa usuario, contraseña, host y nombre de base. Vuelve a pegar la URL completa; no se mostrará en pantalla.")
+
+
+def _prompt_region(runner: Runner, prompt: str, default: str, *, allowed_regions: list[str] | None = None,
+                   exclude: set[str] | None = None) -> str:
+    """Validate a region at entry time and let the user correct it immediately."""
+    excluded = {_normal_region(value) for value in (exclude or set())}
+    while True:
+        answer = input(prompt).strip() or default
+        normalized = _normal_region(answer)
+        if normalized in excluded:
+            print("Esa región ya tiene un entorno Express y no hay cuota para crear otro. Elige otra región.")
+            continue
+        try:
+            _validate_location(runner, answer)
+            if allowed_regions and normalized not in {_normal_region(value) for value in allowed_regions}:
+                print("La región no está dentro de las permitidas por tu suscripción. Opciones: " + ", ".join(allowed_regions))
+                continue
+            return normalized
+        except DeployError as exc:
+            print(f"[REGIÓN INVÁLIDA] {exc}")
+            options = ", ".join(allowed_regions) if allowed_regions else ", ".join(REGION_PREFERENCE)
+            print(f"Vuelve a introducir una región compatible. Opciones conocidas: {options}.")
+
+
+def _prompt_ghcr_owner(saved_owner: str) -> str:
+    while True:
+        raw = input(f"Owner de GitHub que publica los paquetes públicos GHCR [{saved_owner}]: ").strip() or saved_owner
+        try:
+            return normalize_ghcr_owner(raw)
+        except DeployError as exc:
+            print(f"[DATO INVÁLIDO] {exc} Vuelve a introducir el owner.")
+
+def _check_ghcr_images_with_retry(owner: str) -> tuple[str, dict[str, str]]:
+    """Retry a syntactically valid but incorrect GHCR owner/package namespace."""
+    while True:
+        try:
+            return owner, check_public_ghcr_images(owner)
+        except DeployError as exc:
+            message = str(exc)
+            if "no existe o no es pública" not in message:
+                raise
+            print(f"[OWNER/PAQUETE GHCR NO VÁLIDO] {message}")
+            print("Comprueba el owner y que las tres imágenes sean públicas. Puedes volver a introducir el owner.")
+            owner = _prompt_ghcr_owner(owner)
 
 
 def _new_hex_secret() -> str:
@@ -556,32 +683,33 @@ def _read_optional_llm_credentials() -> dict[str, str]:
         if provider in credentials:
             print("[OK] Se detectó y reservó una clave Gemini; no se volverá a solicitar.")
             continue
-        if input(f"¿Configurar {provider.capitalize()} ahora? (s/N): ").strip().lower() not in {"s", "si", "sí", "y", "yes"}:
+        if not _prompt_yes_no(f"¿Configurar {provider.capitalize()} ahora? (s/N): ", default=False):
             continue
-        key = getpass.getpass(f"Clave API {provider} (entrada oculta; Enter para omitir): ").strip()
-        if not key:
-            print(f"[AVISO] {provider.capitalize()} queda sin configurar; el despliegue continuará.")
-            continue
+        while True:
+            key = getpass.getpass(f"Clave API {provider} (entrada oculta; Enter para omitir): ").strip()
+            if not key:
+                print(f"[AVISO] {provider.capitalize()} queda sin configurar; el despliegue continuará.")
+                break
 
-        if _is_stripe_test_api_key(key):
-            print("[AVISO] La clave introducida es de Stripe en modo test (rk_test_/sk_test_), no de IA.")
-            print("        No se enviará a Groq/Gemini. Podrás introducirla en el paso Stripe después del despliegue.")
-            continue
+            if _is_stripe_test_api_key(key):
+                print("[DATO EN CAMPO INCORRECTO] Esa clave pertenece a Stripe test (rk_test_/sk_test_), no a IA.")
+                print("No se descarta el despliegue: vuelve a introducir la clave correcta o pulsa Enter para omitir.")
+                continue
 
-        if provider == "groq" and _is_gemini_api_key(key):
-            # Recover from the common case where the user pastes their Google key at the Groq prompt.
-            credentials["gemini"] = key
-            print("[OK] Se reconoció una clave Gemini (AQ./AIza) en el campo de Groq.")
-            print("     Se reservará para Gemini; Groq quedará omitido. La clave no se mezclará entre proveedores.")
-            continue
+            if provider == "groq" and _is_gemini_api_key(key):
+                credentials["gemini"] = key
+                print("[OK] Se reconoció una clave Gemini (AQ./AIza) en el campo de Groq.")
+                print("Se reservará para Gemini; Groq quedará omitido. La clave no se mezclará entre proveedores.")
+                break
 
-        valid = _is_groq_api_key(key) if provider == "groq" else _is_gemini_api_key(key)
-        if not valid:
-            expected = "gsk_..." if provider == "groq" else "AQ.Ab8R... o AIza..."
-            print(f"[AVISO] Formato no reconocido para {provider.capitalize()}; se omitirá este proveedor.")
-            print(f"        Formato esperado: {expected}. El despliegue continuará sin esta clave.")
-            continue
-        credentials[provider] = key
+            valid = _is_groq_api_key(key) if provider == "groq" else _is_gemini_api_key(key)
+            if not valid:
+                expected = "gsk_..." if provider == "groq" else "AQ.Ab8R... o AIza..."
+                print(f"[DATO INVÁLIDO] El formato de {provider.capitalize()} no es correcto; se esperaba {expected}.")
+                print("Vuelve a introducir la clave correcta o pulsa Enter para omitir este proveedor.")
+                continue
+            credentials[provider] = key
+            break
     return credentials
 
 
@@ -880,31 +1008,40 @@ def prepare_neon_database(
     owner: NeonConnection,
     *,
     reset_existing: bool = False,
+    reuse_existing: bool = False,
     app_password: str | None = None,
 ) -> tuple[str, str, dict]:
-    """Restore the exact local schema + migrations + seed; existing FashionStore needs consent."""
+    """Prepare the runtime role and verify data; optionally restore or reuse existing FashionStore."""
     current_state = _neon_state(runner, owner)
     if current_state == "foreign":
         raise DeployError("Se detectaron tablas ajenas a FashionStore; no se borró ni modificó la base.")
+    should_apply_seed = current_state == "empty" or reset_existing
     if current_state == "fashionstore":
-        if not reset_existing:
-            raise DeployError("La base Neon ya contiene FashionStore; confirma RESTABLECER-DEMO para restaurarla.")
-        print("Restaurando FashionStore: se eliminan las tablas/vistas de public y se aplica el seed local completo ...")
-        if shutil.which("psql"):
-            _psql(runner, ["--quiet", "--command", WIPE_PUBLIC_SQL], owner)
+        if reset_existing:
+            print("Restaurando FashionStore: se eliminan las tablas/vistas de public y se aplica el seed local completo ...")
+            if shutil.which("psql"):
+                _psql(runner, ["--quiet", "--command", WIPE_PUBLIC_SQL], owner)
+            else:
+                _cloud_sql(runner, owner, "scalar", WIPE_PUBLIC_SQL)
+        elif reuse_existing:
+            print("Reutilizando los datos actuales de FashionStore: no se borrarán tablas, pedidos ni registros.")
+            print("Se verificará la semilla, se renovará el rol de aplicación y se comprobarán los permisos.")
         else:
-            _cloud_sql(runner, owner, "scalar", WIPE_PUBLIC_SQL)
+            raise DeployError("La base Neon ya contiene FashionStore; confirma RESTABLECER-DEMO para restaurarla.")
     migration_files = _migration_files_for_bootstrap(ROOT / "database" / "migrations")
     files = [ROOT / "database" / "schema.sql", *migration_files, ROOT / "database" / "seed.sql"]
     for sql_file in files:
         if not sql_file.is_file():
             raise DeployError(f"Falta el archivo SQL requerido: {sql_file.relative_to(ROOT)}")
-    for sql_file in files:
-        print(f"Aplicando {sql_file.relative_to(ROOT)} ...")
-        if shutil.which("psql"):
-            _psql(runner, ["--quiet", "--file", str(sql_file)], owner)
-        else:
-            _cloud_sql(runner, owner, "file", str(sql_file))
+    if should_apply_seed:
+        for sql_file in files:
+            print(f"Aplicando {sql_file.relative_to(ROOT)} ...")
+            if shutil.which("psql"):
+                _psql(runner, ["--quiet", "--file", str(sql_file)], owner)
+            else:
+                _cloud_sql(runner, owner, "file", str(sql_file))
+    elif current_state == "fashionstore" and not reuse_existing:
+        raise DeployError("La base ya contiene FashionStore; selecciona reutilizarla o restaurar la demo.")
 
     runtime_password = app_password or _new_hex_secret()
     runner.add_sensitive(owner.original_url, owner.password, runtime_password)
@@ -1181,6 +1318,207 @@ def _validate_location(runner: Runner, location: str) -> None:
         )
 
 
+def _list_express_environments(runner: Runner, subscription_id: str, location: str) -> list[dict[str, str]]:
+    """Find reusable Express environments in this subscription and region.
+
+    Some Azure CLI/extension builds omit environmentMode from the list response.
+    In that case, read the resource itself through ARM before deciding that no
+    reusable Express environment exists. This avoids creating a duplicate and
+    hitting a subscription-specific regional quota.
+    """
+    raw = runner.az_json([
+        "containerapp", "env", "list", "--subscription", subscription_id, "--only-show-errors",
+    ])
+    if not isinstance(raw, list):
+        raise DeployError("Azure no devolvió una lista válida de Container Apps Environments.")
+
+    wanted_location = _normal_region(location)
+    matches: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        if _normal_region(str(item.get("location") or "")) != wanted_location:
+            continue
+        properties = item.get("properties") if isinstance(item.get("properties"), dict) else {}
+        mode = (
+            properties.get("environmentMode")
+            or properties.get("environment_mode")
+            or properties.get("environmentType")
+            or item.get("environmentMode")
+            or item.get("environmentType")
+            or ""
+        )
+        resource_id = str(item.get("id") or "")
+        name = str(item.get("name") or "")
+        if not resource_id or not name:
+            continue
+
+        # Older CLI extensions may return only a partial list object. Confirm
+        # the mode using the ARM resource endpoint instead of silently missing it.
+        if not str(mode).strip() and resource_id.startswith("/subscriptions/"):
+            try:
+                detail = runner.az_json([
+                    "rest", "--method", "get", "--url",
+                    f"https://management.azure.com{resource_id}?api-version=2025-07-01",
+                ])
+                detail_properties = detail.get("properties", {}) if isinstance(detail, dict) else {}
+                if isinstance(detail_properties, dict):
+                    properties = detail_properties
+                    mode = detail_properties.get("environmentMode") or ""
+            except DeployError:
+                # Never classify an unknown mode as Express. The quota recovery
+                # path can still ask the user to select another region.
+                mode = ""
+
+        if str(mode).strip().casefold() != "express":
+            continue
+        provisioning = str(properties.get("provisioningState") or "Succeeded").casefold()
+        if provisioning != "succeeded":
+            continue
+        group_match = re.search(r"/resourceGroups/([^/]+)/providers/Microsoft\.App/managedEnvironments/", resource_id, re.I)
+        resource_group = str(item.get("resourceGroup") or (group_match.group(1) if group_match else ""))
+        matches.append({
+            "id": resource_id,
+            "name": name,
+            "resource_group": resource_group,
+            "location": wanted_location,
+            "provisioning_state": provisioning,
+        })
+    return sorted(matches, key=lambda env: (env["resource_group"], env["name"]))
+
+
+def _choose_express_environment(
+    runner: Runner,
+    subscription_id: str,
+    location: str,
+    allowed_regions: list[str],
+) -> tuple[str, dict[str, str] | None]:
+    """Reuse a regional Express environment or let the user choose another region."""
+    while True:
+        existing = _list_express_environments(runner, subscription_id, location)
+        if existing:
+            print(f"\nSe detectaron {len(existing)} entorno(s) Express en {location}.")
+            print("Crear otro puede superar el límite regional de tu suscripción. Puedes reutilizar uno sin modificarlo.")
+            for index, environment in enumerate(existing, 1):
+                rg = environment["resource_group"] or "grupo no identificado"
+                print(f"  {index}) {environment['name']}  (RG: {rg}, estado: {environment['provisioning_state']})")
+            print("  0) Elegir otra región y no utilizar estos entornos.")
+            while True:
+                answer = input(f"Selecciona el entorno a reutilizar [0-{len(existing)}] [1]: ").strip() or "1"
+                if answer.isdigit() and 0 <= int(answer) <= len(existing):
+                    selected = int(answer)
+                    break
+                print("Selección inválida. Vuelve a introducir un número de la lista.")
+            if selected:
+                return location, existing[selected - 1]
+
+            alternatives = [region for region in (allowed_regions or list(REGION_PREFERENCE))
+                            if _normal_region(region) != _normal_region(location)]
+            if not alternatives:
+                raise DeployError("No hay otra región permitida disponible; reutiliza el entorno Express existente o cancela.")
+            print("Regiones alternativas permitidas: " + ", ".join(alternatives))
+            location = _prompt_region(
+                runner,
+                f"Introduce otra región [{alternatives[0]}]: ",
+                alternatives[0],
+                allowed_regions=alternatives,
+                exclude={location},
+            )
+            continue
+        return location, None
+
+
+def _create_or_reuse_express_environment(
+    runner: Runner,
+    *,
+    subscription_id: str,
+    resource_group: str,
+    environment_name: str,
+    location: str,
+    allowed_regions: list[str],
+    existing_environment: dict[str, str] | None,
+    state: dict,
+) -> tuple[str, str, str]:
+    """Create Express or recover interactively from a regional quota error."""
+    if existing_environment:
+        print(
+            f"Reutilizando el entorno Express existente {existing_environment['name']} "
+            f"(RG: {existing_environment.get('resource_group') or 'no identificado'}). No se modificará ni eliminará."
+        )
+        return existing_environment["id"], location, existing_environment["name"]
+
+    current_location = location
+    while True:
+        try:
+            runner.az_quiet([
+                "containerapp", "env", "create",
+                "--name", environment_name,
+                "--resource-group", resource_group,
+                "--location", current_location,
+                "--environment-mode", "express",
+                "--logs-destination", "none",
+            ])
+            environment_id = runner.run([
+                "az", "containerapp", "env", "show",
+                "--name", environment_name,
+                "--resource-group", resource_group,
+                "--subscription", subscription_id,
+                "--query", "id", "--only-show-errors", "--output", "tsv",
+            ], quiet=True)
+            environment_id = _tsv_value(environment_id)
+            if not environment_id:
+                raise DeployError("Azure no devolvió el ID del Container Apps Environment recién creado.")
+            return environment_id, current_location, environment_name
+        except DeployError as exc:
+            error_text = str(exc)
+            if "MaxNumberOfRegionalExpressEnvironmentsInSubExceeded" not in error_text:
+                raise
+
+            print("\n[CUOTA REGIONAL] Azure informa que tu suscripción ya alcanzó el máximo de entornos Express en esta región.")
+            print("No es un error de Neon ni de las imágenes. No volveremos a intentar crear otro entorno en esa región.")
+            discovered = _list_express_environments(runner, subscription_id, current_location)
+            if discovered:
+                old_location = current_location
+                current_location, selected = _choose_express_environment(
+                    runner, subscription_id, current_location, allowed_regions
+                )
+                if selected:
+                    print("Se continuará utilizando el entorno Express existente.")
+                    return selected["id"], current_location, selected["name"]
+                if _normal_region(current_location) != _normal_region(old_location):
+                    print(f"Reintentando crear un entorno Express en {current_location} ...")
+                    state["location"] = current_location
+                    state["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    _resource_group_state(state)
+                    continue
+
+            alternatives = [region for region in (allowed_regions or list(REGION_PREFERENCE))
+                            if _normal_region(region) != _normal_region(current_location)]
+            if not alternatives:
+                raise DeployError(
+                    "La suscripción no permite crear otro entorno Express en la región y no quedan regiones alternativas. "
+                    "Reutiliza un entorno existente o solicita a Azure revisar la cuota de la suscripción."
+                ) from exc
+            print("Regiones alternativas permitidas: " + ", ".join(alternatives))
+            current_location = _prompt_region(
+                runner,
+                f"Región alternativa para Express [{alternatives[0]}]: ",
+                alternatives[0],
+                allowed_regions=alternatives,
+                exclude={current_location},
+            )
+            current_location, existing_environment = _choose_express_environment(
+                runner, subscription_id, current_location, allowed_regions
+            )
+            if existing_environment:
+                print("Se reutilizará el entorno Express encontrado en la región alternativa.")
+                return existing_environment["id"], current_location, existing_environment["name"]
+            print(f"Reintentando crear un entorno Express en {current_location} ...")
+            state["location"] = current_location
+            state["updated_at"] = datetime.now(timezone.utc).isoformat()
+            _resource_group_state(state)
+
+
 def _parse_bool_output(output: str) -> str:
     """Accept bare TSV, JSON booleans, and harmless Azure CLI warning wrappers."""
     raw = str(output or "").strip()
@@ -1303,7 +1641,7 @@ def _wait_containerapp(runner: Runner, name: str, resource_group: str, *, attemp
         if last_state.lower() == "succeeded":
             return
         if last_state.lower() == "failed":
-            raise DeployError(f"Azure marcó {name} como Failed. El Resource Group se conserva para revisar/limpiar.")
+            raise DeployError(f"Azure marcó {name} como Failed. Se intentará eliminar el Resource Group nuevo; los entornos Express reutilizados y Neon se conservan.")
         time.sleep(10)
     raise DeployError(f"Timeout esperando Container App {name} (último estado: {last_state or 'sin respuesta'}).")
 
@@ -1376,6 +1714,8 @@ def _create_azure(
     image_urls: dict[str, str],
     state: dict,
     llm_credentials: dict[str, str] | None = None,
+    existing_environment: dict[str, str] | None = None,
+    allowed_regions: list[str] | None = None,
 ) -> tuple[dict[str, str], dict]:
     """Create only scale-to-zero ACA resources and pull public images from GHCR."""
     resource_group = names["resource_group"]
@@ -1414,43 +1754,25 @@ def _create_azure(
     )
     _resource_group_state(state)
 
-    runner.az_quiet(
-        [
-            "containerapp",
-            "env",
-            "create",
-            "--name",
-            names["environment"],
-            "--resource-group",
-            resource_group,
-            "--location",
-            location,
-            "--environment-mode",
-            "express",
-            "--logs-destination",
-            "none",
-        ]
+    requested_environment_name = names["environment"]
+    environment_id, location, actual_environment_name = _create_or_reuse_express_environment(
+        runner,
+        subscription_id=subscription_id,
+        resource_group=resource_group,
+        environment_name=names["environment"],
+        location=location,
+        allowed_regions=allowed_regions or [],
+        existing_environment=existing_environment,
+        state=state,
     )
-    environment_id = runner.run(
-        [
-            "az",
-            "containerapp",
-            "env",
-            "show",
-            "--name",
-            names["environment"],
-            "--resource-group",
-            resource_group,
-            "--query",
-            "id",
-            "--output",
-            "tsv",
-        ],
-        quiet=True,
-    )
-    environment_id = _tsv_value(environment_id)
-    if not environment_id:
-        raise DeployError("Azure no devolvió el ID del Container Apps Environment.")
+    names = {**names, "environment": actual_environment_name}
+    state.update({
+        "location": location,
+        "environment": actual_environment_name,
+        "environment_id": environment_id,
+        "environment_reused": bool(existing_environment) or actual_environment_name != requested_environment_name,
+    })
+    _resource_group_state(state)
 
     ia_key = _new_hex_secret()
     jwt_secret = _new_hex_secret()
@@ -1645,8 +1967,7 @@ def _wait_http(url: str, *, attempts: int = 36) -> bool:
 
 
 def maybe_enable_stripe(runner: Runner, result: dict[str, str], api_payload: dict) -> bool:
-    answer = input("¿Configurar Stripe Checkout test ahora? (s/N): ").strip().lower()
-    if answer not in {"s", "si", "sí", "y", "yes"}:
+    if not _prompt_yes_no("¿Configurar Stripe Checkout test ahora? (s/N): ", default=False):
         print("Stripe no quedó configurado; los pagos reales siguen desactivados y solo queda el simulador.")
         return False
 
@@ -1659,12 +1980,24 @@ def maybe_enable_stripe(runner: Runner, result: dict[str, str], api_payload: dic
     webbrowser.open(STRIPE_TEST_WEBHOOKS)
     input("Cuando veas el secreto whsec_... del endpoint, pulsa Enter para continuar.")
 
-    stripe_key = getpass.getpass("Pega localmente una clave API Stripe test rk_test_... o sk_test_... (oculta): ").strip()
-    if not _is_stripe_test_api_key(stripe_key):
-        raise DeployError("Se rechazó la clave: solo se aceptan claves de prueba rk_test_... o sk_test_... válidas. No pegues aquí claves gsk_ ni AQ./AIza.")
-    webhook_secret = getpass.getpass("Pega localmente el secreto whsec_ del endpoint (oculto): ").strip()
-    if not webhook_secret.startswith("whsec_") or len(webhook_secret) < 24:
-        raise DeployError("El secreto de webhook no tiene formato whsec_ válido.")
+    while True:
+        stripe_key = getpass.getpass("Pega localmente una clave API Stripe test rk_test_... o sk_test_... (oculta; Enter para cancelar Stripe): ").strip()
+        if not stripe_key:
+            print("Stripe no quedó configurado; la aplicación seguirá en modo sandbox/simulador.")
+            return False
+        if _is_stripe_test_api_key(stripe_key):
+            break
+        print("[DATO INVÁLIDO] La clave no tiene formato Stripe test rk_test_... o sk_test_... válido.")
+        print("Vuelve a introducir la clave correcta. No pegues claves Groq ni Gemini aquí.")
+
+    while True:
+        webhook_secret = getpass.getpass("Pega localmente el secreto whsec_ del endpoint (oculto; Enter para cancelar Stripe): ").strip()
+        if not webhook_secret:
+            print("Stripe no quedó configurado porque no se proporcionó el secreto del webhook.")
+            return False
+        if webhook_secret.startswith("whsec_") and len(webhook_secret) >= 24:
+            break
+        print("[DATO INVÁLIDO] El secreto debe comenzar con whsec_ y tener longitud suficiente. Vuelve a introducirlo.")
 
     runner.add_sensitive(stripe_key, webhook_secret)
     api_config = api_payload["properties"]["configuration"]
@@ -1689,17 +2022,54 @@ def maybe_enable_stripe(runner: Runner, result: dict[str, str], api_payload: dic
 
 
 def _print_cleanup(state: dict) -> None:
+    if state.get("resource_group_deleted"):
+        rg = state.get("resource_group", "")
+        print(f"\nLimpieza automática completada: se eliminó el Resource Group nuevo {rg} creado en este intento.", file=sys.stderr)
+        if state.get("environment_reused"):
+            print("El entorno Express reutilizado pertenece a otro Resource Group y no se eliminó.", file=sys.stderr)
+        print("Neon se conserva; no se borró ni eliminó la base de datos.", file=sys.stderr)
+        return
     if state.get("resource_group_created"):
         rg = state.get("resource_group", "")
-        print(f"\nHay recursos Azure posiblemente facturables en el Resource Group {rg}.", file=sys.stderr)
-        print("Revísalos en el Portal; si ese grupo contiene solo esta prueba, elimínalo con:", file=sys.stderr)
+        print(f"\nNo se pudo completar la limpieza automática del Resource Group {rg}.", file=sys.stderr)
+        print("Revísalo en el Portal; si contiene únicamente esta prueba, elimínalo manualmente con:", file=sys.stderr)
         print(f"  az group delete --name {rg} --yes --no-wait", file=sys.stderr)
         print(f"Metadatos sin secretos: {BUILD_STATE.relative_to(ROOT)}", file=sys.stderr)
         print("Neon se conserva; el archivo de estado registra el último punto alcanzado.", file=sys.stderr)
     elif state.get("neon_setup_started") and not state.get("neon_prepared"):
         print("\nLa restauración Neon pudo quedar parcial. Inspecciona la base antes de continuar; el asistente no borrará tablas desconocidas automáticamente.", file=sys.stderr)
     elif state.get("neon_prepared"):
-        print("\nNeon quedó preparada, pero Azure no terminó. Puedes volver a ejecutar y confirmar RESTABLECER-DEMO para reponer los datos de fábrica.", file=sys.stderr)
+        print("\nNeon quedó preparada, pero Azure no terminó. Al volver a ejecutar, el asistente ofrecerá reutilizar y verificar los datos existentes sin borrarlos.", file=sys.stderr)
+
+
+def _cleanup_failed_resource_group(runner: Runner, state: dict) -> bool:
+    """Delete only the brand-new RG created by this run after a failed deployment."""
+    if not state.get("resource_group_created") or not state.get("resource_group"):
+        return False
+    if state.get("status") == "deployed":
+        return False
+    if "--keep-failed-resources" in sys.argv or os.getenv("FASHIONSTORE_KEEP_FAILED_RESOURCES", "").strip() == "1":
+        print("Se conservarán los recursos de diagnóstico por petición (--keep-failed-resources).", file=sys.stderr)
+        state["azure_cleanup_status"] = "kept_by_user"
+        return False
+
+    resource_group = str(state["resource_group"])
+    subscription_id = str(state.get("subscription_id") or "")
+    try:
+        print(f"\nLimpiando automáticamente el Resource Group nuevo {resource_group} del intento fallido ...", file=sys.stderr)
+        args = ["group", "delete", "--name", resource_group, "--yes"]
+        if subscription_id:
+            args.extend(["--subscription", subscription_id])
+        runner.az_quiet(args)
+        state["resource_group_deleted"] = True
+        state["azure_cleanup_status"] = "completed"
+        state["azure_cleanup_completed_at"] = datetime.now(timezone.utc).isoformat()
+        return True
+    except Exception as exc:
+        state["azure_cleanup_status"] = "failed"
+        state["azure_cleanup_error"] = _redact(str(exc), runner.sensitive)
+        print(f"[AVISO] No se pudo eliminar automáticamente {resource_group}: {state['azure_cleanup_error']}", file=sys.stderr)
+        return False
 
 
 def main() -> int:
@@ -1728,13 +2098,15 @@ def main() -> int:
         print("FashionStore: despliegue asistido de prueba Azure Container Apps + Neon.")
         print("Azure Container Apps Express usa Consumption, escala a cero y no crea un entorno de pago, ACR ni Log Analytics.")
         print("Las imágenes públicas vienen de GHCR; Container Apps puede cobrar por uso/egress que exceda las concesiones gratis. No se garantiza $0.")
-        print("El script no borra recursos automáticamente ante un fallo.")
+        print("Si el despliegue falla, se eliminará únicamente el Resource Group nuevo creado por este intento; Neon y entornos Express ajenos se conservarán.")
+        print("Para conservar recursos de diagnóstico, ejecuta tools\\deploy_azure.py --keep-failed-resources.")
         print("El preflight registra solo Microsoft.App si hace falta (metadatos; no crea recursos facturables).")
         print("La ruta configurada usa imágenes públicas de GHCR; el prompt siguiente confirma que aceptas esa configuración.")
-        provider_confirmation = input("¿Confirmas usar GHCR con imágenes públicas? (s/N): ").strip().lower()
-        if provider_confirmation not in {"s", "si", "sí", "y", "yes"}:
+        if not _prompt_yes_no("¿Confirmas usar GHCR con imágenes públicas? (s/N): ", default=False):
             raise DeployError("GHCR no confirmado. No se registraron providers, no se modificó Neon y no se crearon recursos Azure.")
-        if input("Para continuar con las comprobaciones, escribe CONTINUAR: ").strip() != "CONTINUAR":
+        if not _prompt_exact_confirmation(
+            "Para continuar con las comprobaciones, escribe CONTINUAR: ", "CONTINUAR", purpose="continuar con el preflight"
+        ):
             raise DeployError("Cancelado antes de abrir Neon o cambiar la suscripción/recursos.")
 
         subscription_id, subscription_name = _subscription(runner, str(previous_state.get("subscription_id") or "") or None)
@@ -1742,47 +2114,86 @@ def main() -> int:
         if allowed_regions:
             print("Tu suscripción solo permite estas regiones compatibles con Express: " + ", ".join(allowed_regions))
         saved_location = str(previous_state.get("location") or default_region)
-        location = input(f"Región Azure (nombre corto) [{saved_location}]: ").strip() or saved_location
+        location = _prompt_region(
+            runner,
+            f"Región Azure (nombre corto) [{saved_location}]: ",
+            saved_location,
+            allowed_regions=allowed_regions or None,
+        )
+        location, existing_environment = _choose_express_environment(
+            runner, subscription_id, location, allowed_regions or [location]
+        )
         saved_owner = str(previous_state.get("ghcr_owner") or "")
-        ghcr_owner = normalize_ghcr_owner(input(f"Owner de GitHub que publica los paquetes públicos GHCR [{saved_owner}]: ").strip() or saved_owner)
+        ghcr_owner = _prompt_ghcr_owner(saved_owner)
         names = _resource_names()
+        if existing_environment:
+            names["environment"] = existing_environment["name"]
         state.update({**names, "subscription_id": subscription_id, "subscription_name": subscription_name, "location": location, "ghcr_owner": ghcr_owner})
         print(f"Se reservará un Resource Group nuevo: {names['resource_group']} (no se borrarán recursos existentes).")
+        if existing_environment:
+            print(f"Se reutilizará {existing_environment['name']} del Resource Group {existing_environment.get('resource_group') or '(no identificado)'}. No se eliminará ese entorno.")
 
         # Register ACA providers before resource preflight; this updates metadata only.
         _ensure_providers_registered(runner)
         _check_azure_preflight(runner, subscription_id, location, names)
-        image_urls = check_public_ghcr_images(ghcr_owner)
+        ghcr_owner, image_urls = _check_ghcr_images_with_retry(ghcr_owner)
+        state["ghcr_owner"] = ghcr_owner
         print("Preflight Azure y lectura anónima de las tres imágenes GHCR correctos; aún no se han creado recursos.")
         print("\nAbriendo Neon. Usa una base/branch dedicada a FashionStore; no pegues una base con datos ajenos.")
         print("Puedes pegar la URL directa o pooled; el asistente convertirá -pooler al endpoint directo para migraciones.")
         print("La URL se pedirá oculta, se usará localmente y no se guardará en archivos del repo.")
         print(f"Si el navegador no abre automáticamente, visita: {NEON_CONSOLE}")
         webbrowser.open(NEON_CONSOLE)
-        owner_url = getpass.getpass("Pega la URL directa owner de Neon (entrada oculta): ").strip()
-        owner = parse_neon_connection_url(owner_url)
-        runner.add_sensitive(owner.original_url, owner.password)
+        owner, neon_state = _prompt_and_preflight_neon(runner)
         if owner.input_was_pooled:
             print("Detecté -pooler en el host y lo normalicé automáticamente para ejecutar schema/migraciones/seed.")
-        neon_state = preflight_neon(runner, owner)
         state.update({"neon_database": owner.database, "neon_input_was_pooled": owner.input_was_pooled, "neon_state_before_restore": neon_state})
         _save_state(state)
+        reset_existing = False
+        reuse_existing = False
         if neon_state == "fashionstore":
-            print("ATENCIÓN: se eliminarán los datos actuales de FashionStore en public y se repondrá toda la demo local.")
-            if input("Para confirmar esta restauración escribe RESTABLECER-DEMO: ").strip() != "RESTABLECER-DEMO":
-                raise DeployError("Restauración cancelada; no se modificó Neon.")
+            print("Se detectó una base con tablas de FashionStore.")
+            print("  1) REUTILIZAR (recomendado): conservar pedidos, clientes, pagos y demás datos; verificar cuentas y permisos.")
+            print("  2) RESTAURAR DEMO: borrar los objetos/datos de public y volver a aplicar esquema, migraciones y seed.")
+            print("  3) CANCELAR: salir sin modificar Neon.")
+            while True:
+                choice = input("Elige una opción [1-3] [1]: ").strip() or "1"
+                if choice == "1":
+                    reuse_existing = True
+                    break
+                if choice == "2":
+                    reset_existing = _prompt_exact_confirmation(
+                        "Para confirmar la restauración destructiva escribe RESTABLECER-DEMO: ",
+                        "RESTABLECER-DEMO",
+                        purpose="borrar y reconstruir el esquema public de Neon",
+                    )
+                    if not reset_existing:
+                        raise DeployError("Restauración cancelada; Neon no se modificó.")
+                    break
+                if choice == "3" or choice.casefold() in CANCEL_VALUES:
+                    raise DeployError("Cancelado; Neon no se modificó.")
+                print("Opción inválida. Vuelve a introducir 1, 2 o 3; puedes corregir la respuesta.")
 
         llm_credentials = _read_optional_llm_credentials()
         runner.add_sensitive(*(llm_credentials or {}).values())
 
         print("\nConfirmación final:")
-        print("- Se aplicarán schema.sql, todas las migraciones 003–010 y seed.sql, igual que iniciar.py en modo local.")
+        if reuse_existing:
+            print("- Se conservarán los datos actuales de Neon; no se volverán a ejecutar schema.sql, migraciones ni seed.sql.")
+        else:
+            print("- Se aplicarán schema.sql, todas las migraciones 003–010 y seed.sql, igual que iniciar.py en modo local.")
         print("- Se conservarán exactamente las cinco cuentas semilla y sus contraseñas locales; no se desactivarán usuarios.")
         print(f"- Se usarán imágenes GHCR públicas de {ghcr_owner}; no se crea ACR ni se guardan tokens de registry.")
         print("- IA generativa: " + (f"claves configuradas para {', '.join(sorted(llm_credentials))} en secretos de FastAPI." if llm_credentials else "sin claves externas; funcionará el asistente local determinista con datos de la base."))
-        print("- Luego se crearán Resource Group, entorno Express sin Log Analytics y 3 Container Apps a escala cero; uso/egress fuera de cuotas podría generar cargos Azure.")
-        print("- No se borrará Neon ni Azure automáticamente si algo falla.")
-        if input("Escribe DEPLOY-TEST para aplicar la base y desplegar: ").strip() != "DEPLOY-TEST":
+        if existing_environment:
+            print(f"- Se reutilizará el entorno Express existente {existing_environment['name']}; no se creará otro en {location}.")
+        else:
+            print(f"- Se creará un entorno Express nuevo en {location}; si Azure informa cuota regional, podrás reutilizar uno o elegir otra región permitida.")
+        print("- Se crearán 3 Container Apps a escala cero dentro del Resource Group nuevo; el uso/egress fuera de cuotas puede generar cargos Azure.")
+        print("- Si falla Azure, se intentará eliminar únicamente ese Resource Group nuevo. Neon y entornos Express preexistentes se conservarán.")
+        if not _prompt_exact_confirmation(
+            "Escribe DEPLOY-TEST para aplicar la base y desplegar: ", "DEPLOY-TEST", purpose="iniciar el despliegue"
+        ):
             raise DeployError("Cancelado antes de modificar Neon o crear recursos Azure.")
 
         state["neon_setup_started"] = True
@@ -1790,7 +2201,10 @@ def main() -> int:
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
         _save_state(state)
         app_database_url, app_database_password, seed_report = prepare_neon_database(
-            runner, owner, reset_existing=(neon_state == "fashionstore")
+            runner,
+            owner,
+            reset_existing=reset_existing,
+            reuse_existing=reuse_existing,
         )
         runner.add_sensitive(app_database_url, app_database_password)
         state["neon_prepared"] = True
@@ -1811,19 +2225,21 @@ def main() -> int:
             image_urls=image_urls,
             state=state,
             llm_credentials=llm_credentials,
+            existing_environment=existing_environment,
+            allowed_regions=allowed_regions,
         )
 
         print("\nEsperando FastAPI HTTPS en /health ...")
         if not _wait_http(f"{result['fastapi_url']}/health"):
-            raise DeployError("FastAPI no pasó /health tras 3 minutos. El recurso se conserva en el RG para revisar/limpiar.")
+            raise DeployError("FastAPI no pasó /health tras 3 minutos. Se intentará eliminar el Resource Group nuevo; Neon se conserva.")
         print("FastAPI /health: OK")
 
         print("Esperando la API Nest y su conexión Neon en /api/health ...")
         if not _wait_http(f"{result['api_url']}/api/health"):
-            raise DeployError("Nest no pasó /api/health tras 3 minutos. El recurso se conserva en el RG para revisar/limpiar.")
+            raise DeployError("Nest no pasó /api/health tras 3 minutos. Se intentará eliminar el Resource Group nuevo; Neon se conserva.")
         print("Nest /api/health: OK")
         if not _wait_http(result["web_url"]):
-            raise DeployError("La web no respondió HTTP 200 tras 3 minutos. El recurso se conserva en el RG para revisar/limpiar.")
+            raise DeployError("La web no respondió HTTP 200 tras 3 minutos. Se intentará eliminar el Resource Group nuevo; Neon se conserva.")
         print("Web: HTTP 200")
 
         state.update(result)
@@ -1862,7 +2278,9 @@ def main() -> int:
         return 0
 
     except KeyboardInterrupt:
-        print("\nInterrumpido. Revisa Azure si ya empezó la creación; no se eliminó ningún recurso.", file=sys.stderr)
+        print("\nInterrumpido por el usuario.", file=sys.stderr)
+        if state.get("status") != "deployed":
+            _cleanup_failed_resource_group(runner, state)
         state["status"] = "interrupted"
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
         try:
@@ -1875,6 +2293,7 @@ def main() -> int:
     except Exception as exc:
         safe_message = _redact(str(exc), runner.sensitive)
         print(f"[ERROR] {safe_message}", file=sys.stderr)
+        _cleanup_failed_resource_group(runner, state)
         state["status"] = "incomplete"
         state["error"] = safe_message
         state["updated_at"] = datetime.now(timezone.utc).isoformat()
