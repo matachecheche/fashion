@@ -1,44 +1,41 @@
 # BUILD-DEV-CLIENT — FashionStore Mobile (Expo SDK 54)
 
-## Desarrollo local (recomendado)
+## Desarrollo local
 
 ```bash
 npm ci --legacy-peer-deps
 npm run typecheck
-npm start                # Metro bundler; abre Expo Go
+npm start
 ```
 
-- Emulador Android: `EXPO_PUBLIC_API_URL=http://10.0.2.2:3000/api` (ya viene en `.env.example`).
-- Dispositivo físico: usa `http://<IP-LAN-de-tu-PC>:3000/api` (misma red Wi-Fi).
-- `npm run export:android` genera el bundle JS estático (verificación de build, **no** firma el APK).
+- Emulador Android: `EXPO_PUBLIC_API_URL=http://10.0.2.2:3000/api`.
+- Dispositivo físico: usa `http://<IP-LAN-de-tu-PC>:3000/api` en la misma red.
+- `npm run export:android` genera el bundle JS estático; **no es un APK instalable**.
 
-## APK instalable con EAS (requiere cuenta EAS real)
+## APK en Azure (recomendado)
+
+La compilación real en nube Azure usa el pipeline `/azure-pipelines-apk.yml` del repositorio. Consulta [`docs/APK-AZURE.md`](../docs/APK-AZURE.md). La primera configuración crea una vez el pipeline y el grupo de variables `fashionstore-mobile` con `EXPO_PUBLIC_API_URL`; después basta pulsar **Run pipeline** y descargar el artefacto `FashionStore-APK`.
+
+El pipeline valida la API, TypeScript, Expo Prebuild, Gradle, integridad ZIP y firma del APK. Produce un APK `debug` para pruebas internas. La clave debug del agente es temporal, así que no ofrece identidad de firma estable entre builds; para distribución y actualizaciones se debe configurar un keystore privado como Secure File y compilar un perfil release.
+
+## Alternativa EAS
 
 ```bash
 npm install -g eas-cli
-eas login               # abre el navegador; NO compartas tu contraseña
-eas init                # enlaza el proyecto y asigna el projectId a app.json
-./build-apk.bat preview # o: bash build-apk.sh preview / ./build-apk.ps1 preview
+eas login
+eas init
+./build-apk.bat preview
 ```
 
-- El perfil `azure` genera **APK** (no AAB) con `distribution: internal`.
-- `generar-apk-azure.bat` valida `/api/health` antes de compilar, guarda la URL pública
-  (EXPO_PUBLIC_API_URL, no es secreto) en el entorno EAS `production` y dispara el build.
-- El script descarga el APK a `mobile-app/builds/`, valida que no sea 0 bytes y calcula SHA-256.
-- Si EAS Free agotó su cuota, el build fallará visiblemente: no se cambia a un plan de pago
-  automáticamente. Alternativa: build local con Android SDK (`cd android && ./gradlew assembleRelease`)
-  tras `npx expo prebuild`, documentado en `docs/APK.md`.
+`generar-apk-azure.bat` valida la API pública y luego dispara EAS Build; pese a su nombre histórico, ese script no compila dentro de Azure Pipelines. EAS compila en infraestructura de Expo.
 
-## Qué NO hace este pipeline
+## Pruebas en un dispositivo Android
 
-- No crea cuentas, no paga suscripciones, no cambia planes de pago.
-- No inserta secretos en el repositorio ni en el bundle (solo variables `EXPO_PUBLIC_*`, públicas por diseño).
-- No afirma que el APK "funciona" sin instalar y probar en Android real o emulador.
+1. Instala el APK descargado desde el artefacto Azure.
+2. Comprueba inicio de sesión y navegación según rol/tienda.
+3. Prueba catálogo, caja, ventas, reservas e inventario.
+4. Prueba modo avión y sincronización posterior, sin duplicar operaciones.
+5. Prueba cámara/vestidor AR y dictado con los permisos del dispositivo.
+6. En Reportes IA & ML comprueba que las métricas aparezcan como indicadores y tablas, no como JSON.
 
-## Checklist de verificación en dispositivo
-
-1. Instalar el APK (`adb install builds/*.apk` o tocando el archivo).
-2. Permitir cámara → Probador AR muestra la vista previa y el overlay.
-3. Iniciar sesión con una tienda (p. ej. `/tienda/legacy`).
-4. Modo avión → agregar venta (POS) → ver cola "pendiente" en Cuenta.
-5. Reconectar → "Sincronizar cola" → estados actualizados sin duplicar operaciones.
+No declares la app validada en dispositivo hasta completar estas comprobaciones reales.

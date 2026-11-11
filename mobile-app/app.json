@@ -2,7 +2,7 @@
   "expo": {
     "name": "FashionStore",
     "slug": "fashionstore-mobile-app",
-    "version": "2.0.0",
+    "version": "2.0.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "fashionstore",
@@ -19,7 +19,7 @@
     },
     "android": {
       "package": "bo.fashionstore.app",
-      "versionCode": 20,
+      "versionCode": 21,
       "adaptiveIcon": {
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
@@ -49,7 +49,9 @@
         {
           "microphonePermission": "FashionStore necesita el micrófono para dictar consultas de reportes.",
           "speechRecognitionPermission": "FashionStore usa el reconocimiento de voz del dispositivo para transcribir consultas de reportes.",
-          "androidSpeechServicePackages": ["com.google.android.googlequicksearchbox"]
+          "androidSpeechServicePackages": [
+            "com.google.android.googlequicksearchbox"
+          ]
         }
       ],
       "expo-sqlite",

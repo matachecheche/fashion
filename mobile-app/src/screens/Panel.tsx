@@ -83,7 +83,66 @@ const numberOf = (value: unknown, fallback = 0): number => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 const money = (value: unknown): string => `Bs. ${numberOf(value).toFixed(2)}`;
-const formatRows = (value: unknown): string => JSON.stringify(value ?? {}, null, 2);
+const parseRecord = (value: unknown): Row => {
+  if (isRecord(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      return isRecord(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+};
+const ML_FEATURE_LABELS: Record<string, string> = {
+  dias_desde_compra: 'Días desde la última compra',
+  compras_12m: 'Compras en 12 meses',
+  gasto_12m_bs: 'Gasto en 12 meses',
+  interacciones_30d: 'Interacciones en 30 días',
+  stock_disponible: 'Stock disponible',
+  ventas_30d: 'Ventas en 30 días',
+  rotacion_diaria: 'Rotación diaria',
+  plazo_reposicion_dias: 'Plazo de reposición',
+  indice_temporada: 'Índice de temporada',
+};
+const metricPercent = (metrics: Row, key: string): string => {
+  const pct = Number(metrics[`${key}_pct`]);
+  if (Number.isFinite(pct)) return `${pct.toFixed(1)}%`;
+  const ratio = Number(metrics[key]);
+  return Number.isFinite(ratio) ? `${(ratio * 100).toFixed(1)}%` : '—';
+};
+const predictionPresentation = (prediction: Row) => {
+  const value = parseRecord(prediction.valor_json ?? prediction.valor);
+  const features = parseRecord(value.features_sinteticas);
+  const probability = Number(value.probabilidad);
+  const hasProbability = Number.isFinite(probability);
+  const isStock = Object.prototype.hasOwnProperty.call(features, 'stock_disponible');
+  const isSegment = Boolean(value.nombre_segmento || value.cluster_id !== undefined);
+  const title = isSegment ? 'Segmento de clientes' : isStock ? 'Riesgo de quiebre de stock' : 'Propensión de recompra';
+  const detail = isSegment
+    ? textOf(value.nombre_segmento, `Segmento ${textOf(value.cluster_id)}`)
+    : hasProbability
+      ? `${isStock ? 'Probabilidad de quiebre' : 'Probabilidad de recompra'}: ${(probability * 100).toFixed(1)}% · ${Number(value.clase) === 1 ? (isStock ? 'Revisar reposición' : 'Propensión alta') : (isStock ? 'Riesgo bajo' : 'Propensión baja')}`
+      : 'Predicción registrada';
+  const featureLines = Object.entries(features).map(([key, raw]) => {
+    const label = ML_FEATURE_LABELS[key] || key.replace(/_/g, ' ');
+    const valueText = key === 'gasto_12m_bs' ? money(raw) : textOf(raw, '—');
+    return `${label}: ${valueText}`;
+  });
+  return {
+    title,
+    detail,
+    featureLines,
+    recommendation: textOf(value.recomendacion, ''),
+  };
+};
+const MetricTile: React.FC<{ label: string; value: string }> = ({ label, value }) => (
+  <View style={{ flexBasis: '47%', flexGrow: 1, backgroundColor: '#f8fafc', borderWidth: 1, borderColor: Colores.borde, borderRadius: 10, padding: 10 }}>
+    <Text style={{ color: Colores.suave, fontSize: 11, fontWeight: '700' }}>{label}</Text>
+    <Text style={{ color: Colores.tinta, fontSize: 20, fontWeight: '800', marginTop: 3 }}>{value}</Text>
+  </View>
+);
 
 export const PanelScreen: React.FC = () => {
   const { tenantSlug, usuario, online, encolarVenta, mostrarToast } = useApp();
@@ -647,6 +706,12 @@ export const PanelScreen: React.FC = () => {
     const plans = rows;
     const mlModels = rowsOf(record(record(extra).modelos).modelos);
     const mlPredictions = rowsOf(record(record(extra).predicciones).predicciones);
+    const mlSupervised = record(summary?.supervisado);
+    const mlPurchaseMetrics = record(mlSupervised.metricas_holdout);
+    const mlStockModel = record(mlSupervised.modelo_auxiliar_quiebre_stock);
+    const mlStockMetrics = record(mlStockModel.metricas_holdout);
+    const mlUnsupervised = record(summary?.no_supervisado);
+    const mlSegments = rowsOf(mlUnsupervised.segmentos);
     const paymentSagas = rowsOf(extra).filter((item) => textOf(item.estado).toUpperCase() === 'REQUIERE_INTERVENCION');
 
     return (
@@ -820,19 +885,83 @@ export const PanelScreen: React.FC = () => {
         ))}
 
         {module === 'ml' && summary && (
-          <Tarjeta>
-            <Text style={Estilos.h3}>Modelos persistidos por tienda (demostración)</Text>
-            <Text style={Estilos.texto}>Entrenamiento y predicciones se guardan con aislamiento por tenant. Este flujo usa exclusivamente datos sintéticos; no predice sobre clientes/inventario real ni automatiza decisiones comerciales.</Text>
-            <View style={{ gap: 8, marginTop: 10 }}>
-              <Boton titulo="Entrenar y guardar modelos demo" variante="acento" onPress={() => void act('/ia/ml/entrenar', { seed: 2026 }, 'Se persistieron las versiones de demostración para esta tienda.')} deshabilitado={saving || !online} />
-              <Boton titulo="Crear predicción demo persistente" variante="outline" onPress={() => void act('/ia/ml/predecir-demo', { seed: 42 }, 'Predicciones sintéticas guardadas con trazabilidad.')} deshabilitado={saving || !online || mlModels.length < 3} />
-            </View>
-            <Text style={[Estilos.h3, { marginTop: 12 }]}>Modelos: {mlModels.length}</Text>
-            {mlModels.slice(0, 8).map((model, index) => <Text key={`${textOf(model.algoritmo)}-${textOf(model.version)}-${index}`} style={Estilos.texto}>{textOf(model.algoritmo)} · v{textOf(model.version)} · {textOf(model.estado)}</Text>)}
-            <Text style={[Estilos.h3, { marginTop: 10 }]}>Predicciones sintéticas recientes: {mlPredictions.length}</Text>
-            {mlPredictions.slice(0, 3).map((prediction, index) => <Text key={`${textOf(prediction.id)}-${index}`} style={Estilos.texto}>{textOf(prediction.entidad_tipo)} · {formatRows(prediction.valor_json)}</Text>)}
-            <Text selectable style={{ color: Colores.texto, fontSize: 11, marginTop: 10 }}>Métricas del generador reproducible: {formatRows(summary.modelos || summary.supervisado)}</Text>
-          </Tarjeta>
+          <View style={{ gap: 12 }}>
+            <Tarjeta>
+              <Text style={Estilos.h3}>Evaluación de modelos de aprendizaje automático</Text>
+              <Text style={Estilos.texto}>Semilla reproducible: {textOf(summary.semilla)} · {textOf(summary.version_generador)}.</Text>
+              <Text style={[Estilos.texto, { marginTop: 6, color: Colores.warn }]}>Datos sintéticos de demostración: estas métricas no representan clientes ni existencias reales y no ejecutan decisiones comerciales automáticas.</Text>
+            </Tarjeta>
+
+            <Tarjeta>
+              <Text style={Estilos.h3}>Propensión de recompra · Regresión logística</Text>
+              <Text style={Estilos.subtitulo}>Evaluación sobre muestras no utilizadas durante el entrenamiento.</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
+                <MetricTile label="Exactitud" value={metricPercent(mlPurchaseMetrics, 'accuracy')} />
+                <MetricTile label="Precisión" value={metricPercent(mlPurchaseMetrics, 'precision')} />
+                <MetricTile label="Sensibilidad" value={metricPercent(mlPurchaseMetrics, 'recall')} />
+                <MetricTile label="Puntuación F1" value={metricPercent(mlPurchaseMetrics, 'f1')} />
+              </View>
+              <Text style={[Estilos.label, { marginTop: 12 }]}>Matriz de confusión</Text>
+              <Text style={Estilos.texto}>Aciertos de recompra: {textOf(record(mlPurchaseMetrics.matriz_confusion).tp, '0')} · Recompras no detectadas: {textOf(record(mlPurchaseMetrics.matriz_confusion).fn, '0')}</Text>
+              <Text style={Estilos.texto}>Falsas alarmas: {textOf(record(mlPurchaseMetrics.matriz_confusion).fp, '0')} · Aciertos de no recompra: {textOf(record(mlPurchaseMetrics.matriz_confusion).tn, '0')}</Text>
+              <Text style={[Estilos.subtitulo, { marginTop: 4 }]}>Muestras evaluadas: {textOf(mlPurchaseMetrics.muestras_evaluadas, '—')}</Text>
+            </Tarjeta>
+
+            <Tarjeta>
+              <Text style={Estilos.h3}>Riesgo de quiebre de stock</Text>
+              <Text style={Estilos.subtitulo}>Clasificador auxiliar para muestras de inventario sintético.</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
+                <MetricTile label="Exactitud" value={metricPercent(mlStockMetrics, 'accuracy')} />
+                <MetricTile label="Precisión" value={metricPercent(mlStockMetrics, 'precision')} />
+                <MetricTile label="Sensibilidad" value={metricPercent(mlStockMetrics, 'recall')} />
+                <MetricTile label="Puntuación F1" value={metricPercent(mlStockMetrics, 'f1')} />
+              </View>
+              <Text style={[Estilos.label, { marginTop: 12 }]}>Matriz de confusión</Text>
+              <Text style={Estilos.texto}>Quiebres detectados: {textOf(record(mlStockMetrics.matriz_confusion).tp, '0')} · Quiebres no detectados: {textOf(record(mlStockMetrics.matriz_confusion).fn, '0')}</Text>
+              <Text style={Estilos.texto}>Falsas alarmas: {textOf(record(mlStockMetrics.matriz_confusion).fp, '0')} · No quiebres bien clasificados: {textOf(record(mlStockMetrics.matriz_confusion).tn, '0')}</Text>
+              <Text style={[Estilos.subtitulo, { marginTop: 4 }]}>Muestras evaluadas: {textOf(mlStockMetrics.muestras_evaluadas, '—')}</Text>
+            </Tarjeta>
+
+            <Tarjeta>
+              <Text style={Estilos.h3}>Segmentación de clientes · K-Means</Text>
+              <Text style={Estilos.subtitulo}>K = {textOf(mlUnsupervised.k_elegido, '3')} · Muestras analizadas: {textOf(mlUnsupervised.muestras_analizadas, '—')} · Inercia: {textOf(mlUnsupervised.inercia_k3, '—')}</Text>
+              {mlSegments.length === 0 ? <Text style={Estilos.texto}>No hay segmentos disponibles.</Text> : mlSegments.map((segment, index) => {
+                const center = record(segment.centroide_original);
+                return (
+                  <View key={`${textOf(segment.cluster_id)}-${index}`} style={{ borderWidth: 1, borderColor: Colores.borde, borderRadius: 10, padding: 10, marginTop: 10 }}>
+                    <Text style={Estilos.h3}>{textOf(segment.nombre_segmento, `Segmento ${index + 1}`)}</Text>
+                    <Text style={[Estilos.texto, { fontWeight: '800' }]}>{textOf(segment.tamano, '0')} personas · {textOf(segment.porcentaje, '—')}%</Text>
+                    <Text style={Estilos.texto}>Compras/año: {textOf(center.compras_12m)} · Gasto anual: {money(center.gasto_12m_bs)} · Última compra: {textOf(center.dias_desde_compra)} días.</Text>
+                    {segment.decision_negocio ? <Text style={[Estilos.texto, { marginTop: 5 }]}>{textOf(segment.decision_negocio)}</Text> : null}
+                  </View>
+                );
+              })}
+            </Tarjeta>
+
+            <Tarjeta>
+              <Text style={Estilos.h3}>Modelos persistidos por tienda</Text>
+              <Text style={Estilos.texto}>El entrenamiento y las predicciones se guardan con aislamiento por tienda.</Text>
+              <View style={{ gap: 8, marginTop: 10 }}>
+                <Boton titulo="Entrenar y guardar modelos demo" variante="acento" onPress={() => void act('/ia/ml/entrenar', { seed: 2026 }, 'Se persistieron las versiones de demostración para esta tienda.')} deshabilitado={saving || !online} />
+                <Boton titulo="Crear predicción demo persistente" variante="outline" onPress={() => void act('/ia/ml/predecir-demo', { seed: 42 }, 'Predicciones sintéticas guardadas con trazabilidad.')} deshabilitado={saving || !online || mlModels.length < 3} />
+              </View>
+              <Text style={[Estilos.label, { marginTop: 12 }]}>Modelos registrados: {mlModels.length}</Text>
+              {mlModels.slice(0, 8).map((model, index) => <Text key={`${textOf(model.algoritmo)}-${textOf(model.version)}-${index}`} style={Estilos.texto}>{textOf(model.algoritmo)} · versión {textOf(model.version)} · {textOf(model.estado)}</Text>)}
+              <Text style={[Estilos.label, { marginTop: 12 }]}>Predicciones sintéticas recientes: {mlPredictions.length}</Text>
+              {mlPredictions.slice(0, 3).map((prediction, index) => {
+                const view = predictionPresentation(prediction);
+                return (
+                  <View key={`${textOf(prediction.id)}-${index}`} style={{ borderTopWidth: 1, borderTopColor: Colores.borde, paddingTop: 9, marginTop: 8 }}>
+                    <Text style={Estilos.h3}>{view.title}</Text>
+                    <Text style={Estilos.texto}>{view.detail}</Text>
+                    {view.featureLines.length > 0 ? <Text style={[Estilos.subtitulo, { marginTop: 4 }]}>{view.featureLines.join(' · ')}</Text> : null}
+                    {view.recommendation ? <Text style={[Estilos.texto, { marginTop: 4 }]}>{view.recommendation}</Text> : null}
+                    <Text style={[Estilos.subtitulo, { marginTop: 3 }]}>Registro #{textOf(prediction.id)}</Text>
+                  </View>
+                );
+              })}
+            </Tarjeta>
+          </View>
         )}
 
         {module === 'reportes' && <Text style={[Estilos.texto, { marginHorizontal: 4, marginBottom: 8 }]}>El dictado puede depender del idioma, permisos y conectividad del proveedor de reconocimiento instalado en el dispositivo.</Text>}

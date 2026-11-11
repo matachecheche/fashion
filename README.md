@@ -246,15 +246,17 @@ El BAT inicia sesión Azure si hace falta; el asistente pide la URL Neon de form
 
 ## App móvil — compilar el APK
 
-Requisitos reales: cuenta EAS (login con `eas login`), `eas init`, y la API publicada en
-una URL HTTPS (Azure Container Apps, Render, ...). **No hay APK funcional sin esos pasos.**
-Ver `mobile-app/BUILD-DEV-CLIENT.md` y `docs/APK.md` (lista de pasos y qué NO garantiza).
+La opción recomendada para compilar **dentro de la nube Azure** es el pipeline de Azure DevOps definido en [`azure-pipelines-apk.yml`](azure-pipelines-apk.yml). Su configuración de una sola vez y la descarga del artefacto se describen en [`docs/APK-AZURE.md`](docs/APK-AZURE.md). Requiere conectar el repositorio GitHub y configurar el grupo de variables `fashionstore-mobile` con `EXPO_PUBLIC_API_URL`; luego basta pulsar **Run pipeline**.
+
+El pipeline valida la salud de la API, ejecuta TypeScript y Expo Prebuild, compila con Gradle y publica el APK `debug` como artefacto `FashionStore-APK`. Ese APK es para pruebas internas y usa la firma debug temporal del agente; no equivale a una firma release estable para Google Play.
+
+Los scripts `mobile-app/build-apk.bat|ps1|sh` y `mobile-app/generar-apk-azure.bat` son la vía alternativa EAS. El último valida una URL Azure, pero la compilación ocurre en infraestructura Expo, no en Azure DevOps.
 
 ```bash
 cd mobile-app
 npm ci --legacy-peer-deps
-npx tsc --noEmit
-./build-apk.bat preview      # o: generar-apk-azure.bat https://tu-api.azurecontainerapps.io
+npm run typecheck
+npm run export:android  # bundle de verificación; no es un APK
 ```
 
 ## Estado de verificación más reciente

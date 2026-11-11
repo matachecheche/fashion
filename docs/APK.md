@@ -1,46 +1,32 @@
-# APK — Pasos reales y límites
+# APK — compilación y publicación
 
-Este documento existe para evitar falsas promesas. **No existe un APK instalable hasta
-completar los pasos 1–5 y el build en EAS termina con éxito.**
+FashionStore ofrece dos rutas de compilación Android. **Para generar el APK dentro de Azure usa Azure Pipelines**, no `Azure Container Apps`: Container Apps aloja los servicios web/API, mientras que Azure Pipelines ejecuta el proceso temporal de Gradle.
 
-## Qué ya está listo en el repo
+## Opción recomendada: compilar el APK en Azure Pipelines
 
-- Proyecto Expo SDK 54 completo (`mobile-app/`), `tsc --noEmit` limpio, `expo doctor` 18/18.
-- `app.json`: package `bo.fashionstore.app`, `versionCode 20`, scheme `fashionstore`,
-  iconos/splash presentes, `extra.eas.projectId` **deliberadamente ausente** (lo asigna `eas init`).
-- `eas.json` con perfiles `development`, `preview` y `azure` (este último apuntando al perfil
-  internal distribution para pruebas privadas). `EXPO_PUBLIC_API_URL` de producción se fija
-  **por entorno EAS** (`eas env:create`), nunca como secreto en Git.
-- Scripts multiplataforma: `mobile-app/build-apk.bat|ps1|sh` (instalan deps, typecheck,
-  compilan, descargan el APK a `builds/`, validan tamaño > 0 y calculan SHA-256).
-- `mobile-app/generar-apk-azure.bat`: valida `/api/health` de la API pública HTTPS **antes** de compilar; si no es saludable se detiene. El script de compatibilidad `generar-apk-render.bat` delega en este mismo flujo Azure + Neon.
+Sigue [`docs/APK-AZURE.md`](APK-AZURE.md). El archivo `azure-pipelines-apk.yml` configura una compilación cloud que:
 
-## Pasos para un APK real (Azure Container Apps)
+1. Lee `EXPO_PUBLIC_API_URL` del grupo de variables `fashionstore-mobile`.
+2. Comprueba que el endpoint HTTPS `/api/health` responda `estado=ok`.
+3. Instala dependencias, valida TypeScript y ejecuta Expo Prebuild.
+4. Compila el APK Android con Gradle (`:app:assembleDebug`).
+5. Verifica la firma y la integridad del APK y publica el artefacto `FashionStore-APK`.
 
-1. **Desplegar la API** con `desplegar-azure.bat` y seguir `docs/DESPLIEGUE-AZURE.md`.
-   El BAT inicia sesión Azure CLI si hace falta; tú creas una base Neon vacía en el navegador
-   y pegas su URL directa en el prompt local oculto. Tras tu confirmación, el asistente aplica
-   schema/migraciones/seed, crea el rol runtime, cambia la contraseña demo y configura NestJS,
-   FastAPI interno y la web. Puede consumir crédito Azure; no garantiza costo cero. Este flujo
-   todavía debe ejecutarse desde una cuenta real para validar un despliegue cloud.
-2. `curl https://<tu-fqdn>/api/health` → debe responder `{"estado":"ok"}`.
-3. En `mobile-app/`: `npm install -g eas-cli && eas login` (tu cuenta; nunca compartas credenciales).
-4. `eas init` (asigna `projectId` a `app.json`).
-5. Fija la URL pública de la API:
-   `eas env:create --environment production --name EXPO_PUBLIC_API_URL --value "https://<tu-fqdn>/api" --visibility plaintext`
-6. Compila: `build-apk.bat azure` (o `bash build-apk.sh azure`). Tarda minutos; EAS cobra
-   según su plan (hay cuota gratuita limitada). **Si la cuota se agota, el build falla visiblemente;
-   no se cambia a un plan de pago automáticamente.**
-7. Instala el APK resultante: `adb install builds/FashionStore-azure-*.apk`.
+La configuración de Azure DevOps se hace una sola vez. En posteriores builds solo se ejecuta el pipeline. El artefacto es un APK `debug` para pruebas internas, no una distribución de Google Play. La firma debug es efímera en el agente; para actualizaciones estables o distribución pública se necesita un keystore propio y un perfil `release` protegido.
 
-## Límites y advertencias
+## Alternativa: Expo Application Services (EAS)
 
-- El APK de `preview`/`azure` apunta a `EXPO_PUBLIC_API_URL` de **ese perfil** en el momento
-  del build; cambiar la URL después exige recompilar (la URL va embebida en el bundle).
-- El Probador AR usa la cámara del teléfono; `takePictureAsync` captura la foto sin el overlay
-  AR compuesto (el overlay es una vista encima del video). El botón "Guardar look" guarda la
-  foto cruda en el dispositivo; no mezcles el overlay sin revisión de calidad.
-- El seguimiento MediaPipe es **opcional (beta)** dentro de un WebView y nunca es requisito
-  del flujo AR principal.
-- Este repo no garantiza que Google Play acepte el paquete; la ficha, política de privacidad
-  y firma (keystore propio) son responsabilidad del publicador.
+Los scripts `mobile-app/build-apk.bat`, `build-apk.ps1` y `build-apk.sh` siguen usando EAS Build, que compila en la infraestructura de Expo, no en Azure. `mobile-app/generar-apk-azure.bat` es un lanzador de compatibilidad que comprueba la API de Azure y luego ejecuta EAS; su nombre histórico no significa que Gradle se ejecute en Azure.
+
+## ¿Debo volver a desplegar por cambios visuales?
+
+Las correcciones de presentación de ML se realizan en `frontend-web` y `mobile-app`; no modifican el esquema PostgreSQL ni las migraciones. Por tanto:
+
+- **Web:** publica una nueva imagen `fashionstore-web` en GHCR y actualiza la Container App web para que la interfaz corregida quede en producción.
+- **Android:** ejecuta el pipeline de Azure para producir un APK nuevo e instala ese APK en el dispositivo.
+- **Neon:** no restaures la base, no vuelvas a aplicar `seed.sql` y no ejecutes `RESTABLECER-DEMO` por estos cambios de interfaz.
+- **Backend/API:** no requiere reconstrucción por esta corrección visual concreta, salvo que tu despliegue actual tenga otras modificaciones pendientes.
+
+## Limitaciones de verificación
+
+Un pipeline YAML y las comprobaciones locales no acreditan por sí solos un APK compilado e instalado. La compilación cloud real requiere que el propietario conecte el repositorio GitHub y configure el grupo de variables en Azure DevOps; después hay que ejecutar el pipeline e instalar el artefacto en un dispositivo/emulador Android.

@@ -1,0 +1,126 @@
+# Build the FashionStore Android APK on a Microsoft-hosted Azure Pipelines agent.
+# Configure once in Azure DevOps: Pipelines > New pipeline > GitHub > Existing YAML.
+trigger: none
+pr: none
+
+variables:
+  - group: fashionstore-mobile
+  - name: ANDROID_HOME
+    value: /usr/local/lib/android/sdk
+  - name: ANDROID_SDK_ROOT
+    value: /usr/local/lib/android/sdk
+
+pool:
+  vmImage: ubuntu-24.04
+
+steps:
+  - checkout: self
+    clean: true
+
+  - task: NodeTool@0
+    displayName: Use Node.js 22 LTS
+    inputs:
+      versionSpec: '22.x'
+
+  - task: JavaToolInstaller@0
+    displayName: Use Java 17 for Android Gradle
+    inputs:
+      versionSpec: '17'
+      jdkArchitectureOption: x64
+      jdkSourceOption: PreInstalled
+
+  - bash: |
+      set -Eeuo pipefail
+      API_BASE_URL="${EXPO_PUBLIC_API_URL%/}"
+      if [[ -z "$API_BASE_URL" ]]; then
+        echo "##vso[task.logissue type=error]Configura la variable EXPO_PUBLIC_API_URL en el grupo fashionstore-mobile. Debe ser una URL HTTPS terminada en /api."
+        exit 2
+      fi
+      if [[ "$API_BASE_URL" != https://* || "$API_BASE_URL" != */api ]]; then
+        echo "##vso[task.logissue type=error]EXPO_PUBLIC_API_URL debe ser HTTPS y terminar exactamente en /api."
+        exit 2
+      fi
+      echo "Comprobando API publicada antes de compilar..."
+      HEALTH_FILE="$(Agent.TempDirectory)/fashionstore-health.json"
+      curl --fail --silent --show-error --location --max-time 30 \
+        "$API_BASE_URL/health" --output "$HEALTH_FILE"
+      node - "$HEALTH_FILE" <<'NODE'
+      const fs = require('node:fs');
+      const payload = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+      if (payload.estado !== 'ok') {
+        console.error('La API respondió, pero no informó estado=ok.');
+        process.exit(1);
+      }
+      console.log(`API saludable: ${payload.servicio || 'FashionStore API'}`);
+      NODE
+    displayName: Validate production API URL and health
+    env:
+      EXPO_PUBLIC_API_URL: $(EXPO_PUBLIC_API_URL)
+
+  - bash: |
+      set -Eeuo pipefail
+      API_BASE_URL="${EXPO_PUBLIC_API_URL%/}"
+      cd mobile-app
+      echo "Node: $(node --version)"
+      echo "Java: $(java -version 2>&1 | head -n 1)"
+      echo "Android SDK: $ANDROID_HOME"
+
+      SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager 2>/dev/null | sort -V | tail -n 1)"
+      if [[ -z "$SDKMANAGER" ]]; then
+        echo "##vso[task.logissue type=error]No se encontró sdkmanager en la imagen Microsoft-hosted ubuntu-24.04."
+        exit 3
+      fi
+      yes | "$SDKMANAGER" --licenses >/dev/null || true
+      "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006" "cmake;3.22.1"
+
+      npm ci --legacy-peer-deps --no-fund
+      npx tsc --noEmit
+      npx expo prebuild --platform android --clean --no-install
+
+      if [[ ! -f android/gradlew ]]; then
+        echo "##vso[task.logissue type=error]Expo no generó android/gradlew."
+        exit 4
+      fi
+      chmod +x android/gradlew
+      cd android
+      ./gradlew --no-daemon --stacktrace :app:assembleDebug
+
+      APK_SOURCE="app/build/outputs/apk/debug/app-debug.apk"
+      if [[ ! -s "$APK_SOURCE" ]]; then
+        echo "##vso[task.logissue type=error]Gradle terminó sin producir un APK válido."
+        exit 5
+      fi
+      APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner 2>/dev/null | sort -V | tail -n 1)"
+      if [[ -z "$APKSIGNER" ]]; then
+        echo "##vso[task.logissue type=error]No se encontró apksigner para verificar la firma del APK."
+        exit 6
+      fi
+      "$APKSIGNER" verify --verbose "$APK_SOURCE"
+      unzip -t "$APK_SOURCE" >/dev/null
+
+      mkdir -p "$(Build.ArtifactStagingDirectory)/FashionStore-APK"
+      APK_NAME="FashionStore-azure-debug-$(Build.BuildId).apk"
+      cp "$APK_SOURCE" "$(Build.ArtifactStagingDirectory)/FashionStore-APK/$APK_NAME"
+      SHA="$(sha256sum "$(Build.ArtifactStagingDirectory)/FashionStore-APK/$APK_NAME" | awk '{print $1}')"
+      APP_VERSION="$(node -e "const a=require('../app.json').expo; console.log(a.version + ' (' + a.android.versionCode + ')')")"
+      cat > "$(Build.ArtifactStagingDirectory)/FashionStore-APK/INFORMACION-BUILD.txt" <<EOF
+      Aplicación: FashionStore
+      Versión: $APP_VERSION
+      Build Azure Pipelines: $(Build.BuildId)
+      Commit: $(Build.SourceVersion)
+      API incorporada: $API_BASE_URL
+      Tipo: APK debug para pruebas internas (firmado con clave debug efímera del agente)
+      SHA-256: $SHA
+      EOF
+      echo "APK generado y verificado: $APK_NAME"
+      echo "SHA-256: $SHA"
+    displayName: Build, sign-check and package Android APK on Azure agent
+    env:
+      EXPO_PUBLIC_API_URL: $(EXPO_PUBLIC_API_URL)
+
+  - task: PublishPipelineArtifact@1
+    displayName: Publish downloadable FashionStore APK
+    inputs:
+      targetPath: '$(Build.ArtifactStagingDirectory)/FashionStore-APK'
+      artifact: 'FashionStore-APK'
+      publishLocation: pipeline

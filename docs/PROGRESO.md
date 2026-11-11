@@ -40,3 +40,14 @@
 6. Medir los umbrales oficiales una vez disponible el texto literal.
 
 **Siguiente paso inmediato:** revisar con la persona responsable el contenido del ZIP normativo que Drive localizó (o recibir los PDFs extraídos) para completar la trazabilidad literal. El cierre local de integración, UML y paquete verificable ya está generado; Windows, dispositivos y servicios externos requieren sus entornos/autorizaciones.
+
+## 2026-11-11 — Presentación ML web/móvil y compilación APK en Azure
+
+- La página web `frontend-web/src/pages/panel/Reportes.tsx` dejó de imprimir las respuestas ML como bloques JSON. Ahora muestra métricas de clasificación, matriz de confusión, segmentos K-Means y tablas con valores legibles.
+- El panel móvil `mobile-app/src/screens/Panel.tsx` dejó de serializar métricas y predicciones como texto JSON. Ahora representa indicadores, matrices resumidas, segmentos y predicciones como fichas legibles.
+- Se añadió `tools/test_ui_presentation.py` para detectar regresiones de bloques `<pre>`/`JSON.stringify` dentro de vistas web y móvil.
+- Se incrementó la versión móvil a `2.0.1` / Android `versionCode=21`.
+- Se añadió `azure-pipelines-apk.yml`: valida la API HTTPS, ejecuta TypeScript, Expo Prebuild, Gradle `assembleDebug`, verifica el APK y publica `FashionStore-APK` como artefacto Azure Pipelines. La configuración de Azure DevOps es de una sola vez; las ejecuciones posteriores reutilizan la variable `EXPO_PUBLIC_API_URL` del grupo `fashionstore-mobile`.
+- **Pruebas locales de esta revisión:** 99/99 pruebas Python; YAML válido; scripts Bash del pipeline pasan `bash -n`; sintaxis TSX/TS de los tres archivos modificados comprobada con TypeScript `transpileModule`; barrido de vistas sin `<pre>` ni expresiones JSX `JSON.stringify`.
+- **Pendiente de validación externa:** este entorno no consiguió descargar npm desde `registry.npmjs.org`, por lo que no se pudo realizar `npm ci`, `tsc --noEmit` completo ni build Vite/Expo/Gradle. Tampoco se ejecutó el pipeline dentro de la organización Azure DevOps del propietario ni se instaló el APK en Android. No afirmar APK cloud generado hasta que una ejecución Azure termine correctamente y el artefacto se instale y pruebe.
+- Los cambios visuales no alteran PostgreSQL, migraciones, API ni semilla. No ejecutar `RESTABLECER-DEMO` ni volver a cargar Neon por esta corrección. Para producción: reconstruir/actualizar la imagen `fashionstore-web` en GHCR; para Android: ejecutar Azure Pipeline y distribuir el APK nuevo.
