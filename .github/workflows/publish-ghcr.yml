@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Normalize GHCR owner
         id: owner
@@ -30,7 +30,7 @@ jobs:
       # Build NestJS before publishing any image. This prevents a TypeScript
       # compilation failure from leaving GHCR with a partially updated release.
       - name: Set up Node for the NestJS preflight
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm

@@ -12,7 +12,7 @@ export const DEFAULT_TENANT_SLUG: string = (
 ).toLowerCase();
 
 export const APP_NAME = 'FashionStore';
-export const APP_VERSION = '2.1.0';
+export const APP_VERSION = '2.2.2';
 
 export function apiAssetUrl(pathOrUrl?: string | null): string {
   if (!pathOrUrl) return `${API_BASE.replace(/\/api$/, '')}/assets/prendas/vestido-rojo-foto.jpg`;

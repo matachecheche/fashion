@@ -100,12 +100,19 @@
 - La compilación nativa release, firma estable y prueba en dispositivo deben confirmarse en Azure usando la API y el keystore del propietario.
 
 
-## Versión móvil 2.2.1 — Hotfix de asistente y pipeline
+## Versión móvil 2.2.2 — Diagnóstico de PostgreSQL y hotfix CI
 
 - Se eliminó el atributo JSX duplicado `keyboardShouldPersistTaps` de la lista del asistente Android.
 - Se asegura que `specificStatus` esté declarado antes de usarse en `isAssistantDetailRequest`, evitando TS2448 durante el build NestJS.
-- Se alineó la versión móvil en `2.2.1` y el `versionCode` Android base en `25`.
+- Se alineó la versión móvil en `2.2.2` y el `versionCode` Android base en `26`.
 - `GET /api/ia/estado?probar=true` puede ejecutar una prueba real de Groq y Gemini desde FastAPI a través de NestJS, con errores saneados y sin exponer claves.
 - Los errores de conexión/resolución del tenant en PostgreSQL se reportan como HTTP 503 `TENANT_RESOLUTION_FAILED`, con un código diagnóstico y sin devolver credenciales.
 - Se añadieron instrucciones de diagnóstico para diferenciar fallo de base de datos, resolución de tenant, proxy NestJS→FastAPI y claves del proveedor.
-- Suite Python del repositorio: 119 pruebas aprobadas. El análisis del compilador no detecta TS17001, TS2448 ni TS2454 en los archivos corregidos. No se declara un `npm run build` integral local: npm ci no terminó de recuperar todas las dependencias en este entorno.
+- Se añadió `/api/health/live` independiente de PostgreSQL y el healthcheck de readiness devuelve HTTP 503 con un código diagnóstico seguro; también rechaza `DATABASE_URL` ausente en producción. Se actualizaron las acciones del workflow a runtimes Node 24 compatibles (checkout/setup-node v7, setup-java v6, cache v6 y upload-artifact v7). Suite Python del repositorio: 121 pruebas aprobadas. El análisis del compilador no detecta TS17001, TS2448 ni TS2454 en los archivos corregidos. No se declara un `npm run build` integral local: npm ci no terminó de recuperar todas las dependencias en este entorno.
+
+
+## Límites de verificación de 2.2.2
+
+- La suite Python del repositorio pasa 120 pruebas.
+- NestJS no pudo completar `npm ci`/`npm run build` en este entorno por timeout de descarga de dependencias. El CI de GitHub debe confirmar el build TypeScript real.
+- El diagnóstico HTTP 503 permite identificar el problema real de PostgreSQL después de desplegar la imagen nueva; aún no se puede identificar la causa específica de la instancia Azure solo con el HTTP 500 anterior.

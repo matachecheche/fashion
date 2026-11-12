@@ -18,7 +18,12 @@ let poolInstance: Pool | null = null;
 
 export function getPool(): Pool {
   if (!poolInstance) {
-    const connectionString = process.env.DATABASE_URL || 'postgresql://postgres@127.0.0.1:5432/fashionstore';
+    const configuredDatabaseUrl = String(process.env.DATABASE_URL || '').trim();
+    const isProduction = String(process.env.NODE_ENV || '').toLowerCase() === 'production';
+    if (isProduction && !configuredDatabaseUrl) {
+      throw new Error('DATABASE_URL_REQUIRED: configura la URL PostgreSQL de producción en Azure Container Apps.');
+    }
+    const connectionString = configuredDatabaseUrl || 'postgresql://postgres@127.0.0.1:5432/fashionstore';
     const sslEnabled =
       String(process.env.DATABASE_SSL || 'false').toLowerCase() === 'true' ||
       /(?:^|[?&])sslmode=require(?:&|$)/i.test(connectionString);
@@ -225,6 +230,8 @@ export class TenantResolutionMiddleware implements NestMiddleware {
     if (
       pathOnly === '/api/health' ||
       pathOnly === '/health' ||
+      pathOnly === '/api/health/live' ||
+      pathOnly === '/health/live' ||
       pathOnly === '/api/salud' ||
       pathOnly === '/salud' ||
       pathOnly === '/api/auth/tiendas' ||
@@ -312,7 +319,14 @@ export class TenantResolutionMiddleware implements NestMiddleware {
         : await Db.resolveTenantBySlug(effectiveSlug);
     } catch (error: any) {
       const rawCode = String(error?.code || '');
-      const diagnosticCode = /^[A-Z0-9_]{2,32}$/.test(rawCode) ? rawCode : 'TENANT_DATABASE_ERROR';
+      const errorMessage = String(error?.message || '');
+      const diagnosticCode = /^[A-Z0-9_]{2,32}$/.test(rawCode)
+        ? rawCode
+        : errorMessage.includes('DATABASE_URL_REQUIRED')
+          ? 'DATABASE_URL_REQUIRED'
+          : errorMessage.includes('DATABASE_SSL_REQUIRED')
+            ? 'DATABASE_SSL_REQUIRED'
+            : 'TENANT_DATABASE_ERROR';
       console.error(`[FashionStore] No se pudo resolver el tenant '${effectiveSlug}' en ${pathOnly}: ${diagnosticCode}`);
       res.status(503).json({
         statusCode: 503,

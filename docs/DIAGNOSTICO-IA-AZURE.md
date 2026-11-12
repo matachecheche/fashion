@@ -10,6 +10,7 @@ Sustituye el dominio si tu web tiene otro hostname:
 
 ```powershell
 $base = "https://fashionstore-web-4edbf7.orangerock-f50972dc.chilecentral.azurecontainerapps.io"
+curl.exe -i "$base/api/health/live"
 curl.exe -i "$base/api/health"
 curl.exe -i -H "X-Tenant-Slug: legacy" "$base/api/ia/estado"
 curl.exe -i -H "X-Tenant-Slug: legacy" "$base/api/ia/estado?probar=true"
@@ -17,7 +18,8 @@ curl.exe -i -H "X-Tenant-Slug: legacy" "$base/api/ia/estado?probar=true"
 
 Interpretación:
 
-- `/api/health` debe responder HTTP 200 y JSON con `estado: ok`. Si devuelve 500/503, revisa primero la conexión de NestJS con PostgreSQL, TLS y el rol `app_readonly`.
+- `/api/health/live` debe responder HTTP 200 si el proceso NestJS está activo; no consulta PostgreSQL.
+- `/api/health` valida la disponibilidad real de PostgreSQL y el rol `app_readonly`. Debe responder HTTP 200 y `estado: ok`; si no, devuelve HTTP 503 con `diagnostico` (por ejemplo `DATABASE_URL_REQUIRED`, `DATABASE_SSL_REQUIRED`, `28P01`, `42501`, `ECONNREFUSED` o `ENOTFOUND`).
 - `/api/ia/estado` debe mostrar `proxy: nestjs` y proveedor `groq` o `gemini`. `local_rules` indica que se está usando el respaldo local.
 - `/api/ia/estado?probar=true` ejecuta una prueba real por cada proveedor configurado. `pruebas[].ok=true` significa que esa clave y el modelo pudieron responder; si es `false`, revisa el mensaje `error` sin compartir la clave.
 - `TENANT_RESOLUTION_FAILED`/HTTP 503 indica un error resolviendo `legacy` en PostgreSQL antes de llamar a FastAPI. No es un error de la clave de IA.
@@ -54,3 +56,10 @@ Usa el nombre real de la Container App y del Resource Group de tu despliegue. Bu
 ## 5. Importante
 
 El modo local es un respaldo de seguridad; no equivale a Groq/Gemini. Primero debe responder bien el endpoint `/api/health`, luego debe resolverse el tenant `legacy`, después NestJS debe llegar a FastAPI y finalmente la prueba de proveedor debe dar `ok: true`.
+
+## 6. Orden de publicación y despliegue
+
+1. Primero debe pasar el workflow CI (incluye `npm run build` de NestJS).
+2. Después publica las imágenes con `Publish FashionStore images to GHCR`.
+3. Solo cuando GHCR termine correctamente, actualiza las Container Apps de NestJS y FastAPI a las etiquetas nuevas; publicar imágenes no cambia por sí solo la revisión activa de Azure.
+4. Confirma `/api/health/live` (proceso), luego `/api/health` (PostgreSQL), luego `/api/ia/estado` y finalmente `/api/ia/estado?probar=true`.

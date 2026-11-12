@@ -978,8 +978,8 @@ function isAssistantDetailRequest(question: string): boolean {
   const asksForNamedData = /\b(informacion|datos?)\b.*\b(de|del|sobre)\b/.test(q);
   const asksCount = /\b(cuant\w*|cuanto|cuanta|conteo|cantidad(?:es)?|total(?:es)?|resumen|metricas?)\b/.test(q);
   const asksConcept = /\b(que es|que significa|definicion|concepto de)\b/.test(q);
-  if (asksConcept && !listIntent && !asksForNamedData && !specificStatus && !asksCount) return false;
   const specificStatus = /\b(estado|estatus|situacion|pendiente|vencid\w*|rechazad\w*|aprob\w*|fallid\w*|critico|critica|abiert\w*|cerrad\w*|procesad\w*|sincronizad\w*)\b/.test(q);
+  if (asksConcept && !listIntent && !asksForNamedData && !specificStatus && !asksCount) return false;
   const asksAnalysis = /\b(que|como va|como van|como esta|como estan|que paso|que sucede|por que|cuando|cual|cuales|explica|explicame|analiza|historial|cuentame|hablame|informame|quiero saber|necesito saber)\b/.test(q);
   return (listIntent || asksForNamedData || specificStatus || asksAnalysis) && (!asksCount || listIntent || specificStatus);
 }

@@ -61,6 +61,19 @@ class AzureApkPipelineTests(unittest.TestCase):
         self.assertIn('"$APKSIGNER" verify', build_script)
         self.assertIn("assets/index.android.bundle", build_script)
 
+    def test_github_actions_use_node24_compatible_major_versions(self) -> None:
+        apk = (ROOT / ".github/workflows/build-apk.yml").read_text(encoding="utf-8")
+        self.assertIn("actions/checkout@v7", apk)
+        self.assertIn("actions/setup-node@v7", apk)
+        self.assertIn("actions/setup-java@v6", apk)
+        self.assertIn("actions/cache@v6", apk)
+        self.assertIn("actions/upload-artifact@v7", apk)
+        for workflow in ("ci.yml", "publish-ghcr.yml"):
+            source = (ROOT / ".github/workflows" / workflow).read_text(encoding="utf-8")
+            self.assertIn("actions/checkout@v7", source)
+            if "setup-node@" in source:
+                self.assertIn("actions/setup-node@v7", source)
+
     def test_pipeline_checks_live_api_health_before_build(self) -> None:
         source = (ROOT / "mobile-app/ci/build-azure-apk.sh").read_text(encoding="utf-8")
         self.assertIn("$API_BASE_URL/health", source)
@@ -69,16 +82,16 @@ class AzureApkPipelineTests(unittest.TestCase):
 
     def test_mobile_app_version_was_incremented_for_ui_fix(self) -> None:
         app = json.loads((ROOT / "mobile-app/app.json").read_text(encoding="utf-8"))["expo"]
-        self.assertEqual(app["version"], "2.2.1")
-        self.assertEqual(app["android"]["versionCode"], 25)
+        self.assertEqual(app["version"], "2.2.2")
+        self.assertEqual(app["android"]["versionCode"], 26)
         config_source = (ROOT / "mobile-app/src/config.ts").read_text(encoding="utf-8")
-        self.assertIn("APP_VERSION = '2.2.1'", config_source)
+        self.assertIn("APP_VERSION = '2.2.2'", config_source)
 
     def test_mobile_version_metadata_stays_aligned(self) -> None:
         package = json.loads((ROOT / "mobile-app/package.json").read_text(encoding="utf-8"))
         lock = json.loads((ROOT / "mobile-app/package-lock.json").read_text(encoding="utf-8"))
         app = json.loads((ROOT / "mobile-app/app.json").read_text(encoding="utf-8"))["expo"]
-        self.assertEqual(package["version"], "2.2.1")
+        self.assertEqual(package["version"], "2.2.2")
         self.assertEqual(lock["version"], package["version"])
         self.assertEqual(lock["packages"][""]["version"], package["version"])
         self.assertEqual(app["version"], package["version"])
@@ -134,6 +147,16 @@ class AzureApkPipelineTests(unittest.TestCase):
         source = (ROOT / "backend-nest/src/ia/ia.module.ts").read_text(encoding="utf-8")
         self.assertIn("@Query('probar') probar?: string", source)
         self.assertIn("query: probar === 'true' ? { probar: 'true' } : undefined", source)
+
+    def test_health_exposes_liveness_and_actionable_database_readiness(self) -> None:
+        source = (ROOT / "backend-nest/src/app.module.ts").read_text(encoding="utf-8")
+        middleware = (ROOT / "backend-nest/src/common/db.ts").read_text(encoding="utf-8")
+        self.assertIn("@Get('health/live')", source)
+        self.assertIn("DATABASE_HEALTH_CHECK_FAILED", source)
+        self.assertIn("ServiceUnavailableException", source)
+        self.assertIn("/api/health/live", middleware)
+        self.assertIn("DATABASE_URL_REQUIRED", middleware)
+        self.assertIn("DATABASE_URL_REQUIRED", (ROOT / "backend-nest/src/common/db.ts").read_text(encoding="utf-8"))
 
     def test_tenant_resolution_database_errors_are_actionable(self) -> None:
         source = (ROOT / "backend-nest/src/common/db.ts").read_text(encoding="utf-8")

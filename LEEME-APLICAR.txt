@@ -1,0 +1,71 @@
+FASHIONSTORE 2.2.2 — HOTFIX DE CI, VERSION, WORKFLOWS Y DIAGNOSTICO AZURE
+
+IMPORTANTE: aplica este parche SOBRE la raiz de tu repositorio GitHub `fashion`.
+No copies la carpeta completa dentro de otra carpeta ni subas el ZIP como archivo.
+
+FORMA SEGURA (PowerShell):
+1) Abre PowerShell dentro de la carpeta raiz del repositorio, donde ves backend-nest, mobile-app y .git.
+2) Ejecuta (ajusta el nombre/ruta si tu descarga está en otra carpeta):
+
+   Expand-Archive -LiteralPath "$HOME\Downloads\FashionStore-2.2.2-Correccion-CI-Azure.zip" -DestinationPath "$PWD" -Force
+
+3) Comprueba que los cambios llegaron a los archivos CORRECTOS:
+
+   node -p "require('./mobile-app/app.json').expo.version"
+   node -p "require('./mobile-app/app.json').expo.android.versionCode"
+   node -p "require('./mobile-app/package.json').version"
+   Select-String -Path .\backend-nest\src\ia\asistente-context.ts -Pattern 'const specificStatus|if \(asksConcept'
+   (Select-String -Path .\mobile-app\src\screens\Asistente.tsx -Pattern 'keyboardShouldPersistTaps="handled"' -AllMatches).Count
+
+   Debe mostrar: 2.2.2, 26, 2.2.2; `const specificStatus` ANTES de la condición; y 1.
+
+4) Comprueba los archivos que Git detecta:
+
+   git status --short
+
+   Deben aparecer, entre otros, backend-nest/src/ia/asistente-context.ts,
+   mobile-app/app.json, mobile-app/package.json y .github/workflows/build-apk.yml.
+   Si no aparecen, el ZIP no se extrajo en la raiz correcta: NO hagas commit todavía.
+
+5) Ejecuta las pruebas locales:
+
+   python -m unittest discover -s tools -p "test_*.py" -v
+   cd backend-nest
+   npm ci --legacy-peer-deps
+   npm run build
+   cd ..
+
+6) Solo si las pruebas y el build pasan:
+
+   git add .
+   git commit -m "Fix NestJS build and Azure database diagnostics 2.2.2"
+   git push origin main
+
+CAMBIOS IMPORTANTES:
+- Corrige el orden de `specificStatus` (TypeScript TS2448).
+- Elimina atributo JSX duplicado en el asistente Android.
+- Sincroniza versionName 2.2.2 y versionCode base 26 en Expo/package/lock.
+- Actualiza acciones GitHub a runtimes Node 24: checkout/setup-node v7, setup-java v6,
+  cache v6, upload-artifact v7; Expo sigue usando Node 20.19 para SDK 54.
+- Añade GET /api/health/live (liveness, no depende de PostgreSQL).
+- GET /api/health sigue siendo readiness de PostgreSQL; ahora devuelve HTTP 503 con
+  un código diagnóstico seguro en vez de un HTTP 500 genérico.
+- Producción sin DATABASE_URL se identifica como DATABASE_URL_REQUIRED.
+
+DESPLIEGUE:
+Tras el commit, primero debe pasar CI y luego `Publish public FashionStore images to GHCR`.
+Publicar imágenes NO actualiza por sí solo Azure. El workflow publica:
+  ghcr.io/matachecheche/fashionstore-api:latest
+  ghcr.io/matachecheche/fashionstore-ai:latest
+  ghcr.io/matachecheche/fashionstore-web:latest
+Después actualiza las Container Apps de NestJS y FastAPI a las imágenes recién publicadas
+(crea una nueva revisión en Azure). Luego prueba:
+
+   $base = "https://fashionstore-web-4edbf7.orangerock-f50972dc.chilecentral.azurecontainerapps.io"
+   curl.exe -i "$base/api/health/live"
+   curl.exe -i "$base/api/health"
+   curl.exe -i -H "X-Tenant-Slug: legacy" "$base/api/ia/estado"
+
+El health/live debe dar 200. El health normal debe dar 200 si la base y el rol
+app_readonly funcionan; si da 503, revisa `diagnostico` y corrige DATABASE_URL,
+TLS, permisos/migraciones en Azure. No compartas secretos ni DATABASE_URL.
