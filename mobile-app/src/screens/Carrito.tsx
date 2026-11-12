@@ -35,7 +35,7 @@ export const CarritoScreen: React.FC = () => {
         <Encabezado titulo="🛒 Carrito" subtitulo="Los precios se recalculan en el servidor al confirmar." />
       </View>
 
-      <FlatList
+      <FlatList keyboardShouldPersistTaps="handled"
         data={carrito}
         keyExtractor={(item) => String(item.variante_id)}
         contentContainerStyle={{ padding: 16, width: '100%', maxWidth: 980, alignSelf: 'center', flexGrow: 1 }}

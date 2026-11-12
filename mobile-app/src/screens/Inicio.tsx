@@ -58,7 +58,7 @@ export const InicioScreen: React.FC = () => {
   );
 
   return (
-    <ScrollView
+    <ScrollView keyboardShouldPersistTaps="handled"
       style={Estilos.contenedor}
       contentContainerStyle={Estilos.scroll}
       refreshControl={<RefreshControl refreshing={refrescando} onRefresh={onRefresh} tintColor={Colores.acento} />}
@@ -97,7 +97,7 @@ export const InicioScreen: React.FC = () => {
 
       <Seccion titulo="Colección destacada" accion={<TouchableOpacity onPress={() => nav.setTab('catalogo')}><Text style={{ color: Colores.acentoOscuro, fontSize: 11, fontWeight: '900' }}>VER TODO →</Text></TouchableOpacity>}>
         {destacados.length ? (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingRight: 4 }}>
+          <ScrollView keyboardShouldPersistTaps="handled" horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingRight: 4 }}>
             {destacados.map((product) => renderProduct(product))}
           </ScrollView>
         ) : (
@@ -107,7 +107,7 @@ export const InicioScreen: React.FC = () => {
 
       {recomendados.length > 0 && (
         <Seccion titulo="Selección para ti">
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingRight: 4 }}>
+          <ScrollView keyboardShouldPersistTaps="handled" horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingRight: 4 }}>
             {recomendados.map((product) => renderProduct(product, true))}
           </ScrollView>
         </Seccion>

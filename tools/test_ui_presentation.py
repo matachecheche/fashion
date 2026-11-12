@@ -69,19 +69,52 @@ class AzureApkPipelineTests(unittest.TestCase):
 
     def test_mobile_app_version_was_incremented_for_ui_fix(self) -> None:
         app = json.loads((ROOT / "mobile-app/app.json").read_text(encoding="utf-8"))["expo"]
-        self.assertEqual(app["version"], "2.0.1")
-        self.assertEqual(app["android"]["versionCode"], 21)
+        self.assertEqual(app["version"], "2.2.0")
+        self.assertEqual(app["android"]["versionCode"], 24)
         config_source = (ROOT / "mobile-app/src/config.ts").read_text(encoding="utf-8")
-        self.assertIn("APP_VERSION = '2.0.1'", config_source)
+        self.assertIn("APP_VERSION = '2.2.0'", config_source)
 
     def test_mobile_version_metadata_stays_aligned(self) -> None:
         package = json.loads((ROOT / "mobile-app/package.json").read_text(encoding="utf-8"))
         lock = json.loads((ROOT / "mobile-app/package-lock.json").read_text(encoding="utf-8"))
         app = json.loads((ROOT / "mobile-app/app.json").read_text(encoding="utf-8"))["expo"]
-        self.assertEqual(package["version"], "2.0.1")
+        self.assertEqual(package["version"], "2.2.0")
         self.assertEqual(lock["version"], package["version"])
         self.assertEqual(lock["packages"][""]["version"], package["version"])
         self.assertEqual(app["version"], package["version"])
+
+
+    def test_public_web_proxy_can_be_used_as_the_mobile_api_base(self) -> None:
+        nginx = (ROOT / "frontend-web/nginx.azure.conf").read_text(encoding="utf-8")
+        deploy = (ROOT / "tools/deploy_azure.py").read_text(encoding="utf-8")
+        docs = (ROOT / "docs/APK-AZURE.md").read_text(encoding="utf-8")
+        self.assertIn("location /api/", nginx)
+        self.assertIn("proxy_pass ${API_UPSTREAM};", nginx)
+        self.assertIn("_configure_web_api_upstream(web_payload, api_url)", deploy)
+        self.assertIn("fashionstore-web-4edbf7.orangerock-f50972dc.chilecentral.azurecontainerapps.io/api", docs)
+        self.assertIn("/api/health", docs)
+
+    def test_android_shell_respects_keyboard_safe_area_and_hardware_back(self) -> None:
+        source = (ROOT / "mobile-app/App.tsx").read_text(encoding="utf-8")
+        for marker in (
+            "useSafeAreaInsets",
+            "Keyboard.addListener",
+            "KeyboardAvoidingView",
+            "keyboardWillShow",
+            "keyboardDidShow",
+            "hardwareBackPress",
+            'accessibilityRole="tab"',
+            "sincronizar()",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, source)
+        self.assertIn('keyboardShouldPersistTaps="handled"', (ROOT / "mobile-app/src/screens/Auth.tsx").read_text(encoding="utf-8"))
+
+    def test_web_mobile_styles_keep_controls_tappable_and_layouts_responsive(self) -> None:
+        source = (ROOT / "frontend-web/src/styles.css").read_text(encoding="utf-8")
+        for marker in ("@media (max-width: 640px)", "min-height: 44px", "grid-template-columns: repeat(2, minmax(0, 1fr))", "env(safe-area-inset-bottom)", "overflow-x: auto"):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, source)
 
     def test_assistant_detail_status_is_declared_before_use(self) -> None:
         source = (ROOT / "backend-nest/src/ia/asistente-context.ts").read_text(encoding="utf-8")

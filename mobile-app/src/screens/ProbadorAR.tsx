@@ -161,7 +161,7 @@ export const ProbadorARScreen: React.FC<{ navParams?: any }> = ({ navParams }) =
   const confianzaCamara = permiso?.granted && usandoCamara;
 
   return (
-    <ScrollView style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
+    <ScrollView keyboardShouldPersistTaps="handled" style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
       <Text style={Estilos.titulo}>🪞 Vestidor Virtual AR</Text>
       <Text style={Estilos.subtitulo}>
         Superposición de prendas con overlay transparente. Arrastra con un dedo; escala con los botones.
@@ -279,7 +279,7 @@ export const ProbadorARScreen: React.FC<{ navParams?: any }> = ({ navParams }) =
       {/* Selector de prenda */}
       <Tarjeta style={{ marginTop: 12 }}>
         <Text style={Estilos.h3}>Prenda y color (8 × 12 = 96 overlays AR)</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+        <ScrollView keyboardShouldPersistTaps="handled" horizontal showsHorizontalScrollIndicator={false}>
           {TIPOS.map((t) => (
             <TouchableOpacity
               key={t}
@@ -299,7 +299,7 @@ export const ProbadorARScreen: React.FC<{ navParams?: any }> = ({ navParams }) =
           ))}
         </ScrollView>
         <View style={{ height: 8 }} />
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+        <ScrollView keyboardShouldPersistTaps="handled" horizontal showsHorizontalScrollIndicator={false}>
           {COLORES.map((c) => (
             <TouchableOpacity
               key={c}

@@ -49,7 +49,7 @@ export const NotificacionesScreen: React.FC = () => {
   }
 
   return (
-    <ScrollView style={Estilos.contenedor} contentContainerStyle={Estilos.scroll} refreshControl={<RefreshControl refreshing={loading} onRefresh={cargar} tintColor={Colores.acento} />}>
+    <ScrollView keyboardShouldPersistTaps="handled" style={Estilos.contenedor} contentContainerStyle={Estilos.scroll} refreshControl={<RefreshControl refreshing={loading} onRefresh={cargar} tintColor={Colores.acento} />}>
       <Encabezado titulo="Notificaciones" subtitulo={`${noLeidas} sin leer · Avisos de tu tienda y de tu cuenta.`} />
       {noLeidas > 0 && <Boton titulo={saving ? 'Actualizando…' : 'Marcar todas como leídas'} variante="outline" deshabilitado={saving || !online} onPress={() => void marcarTodas()} estilo={{ marginBottom: 14 }} />}
       {loading && items.length === 0 ? <View style={{ padding: 30, alignItems: 'center' }}><ActivityIndicator size="large" color={Colores.acento} /></View> : null}

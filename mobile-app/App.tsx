@@ -1,15 +1,19 @@
 /** FashionStore Mobile — navegación adaptativa, segura para Android edge-to-edge. */
 import { StatusBar } from 'expo-status-bar';
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  BackHandler,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
   useWindowDimensions,
 } from 'react-native';
-import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaProvider, SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppProvider, useApp } from './src/context';
 import { NavProvider, TabName, useNav } from './src/navigation';
 import AsistenteScreen from './src/screens/Asistente';
@@ -32,6 +36,14 @@ import ReservaScreen from './src/screens/Reservar';
 import ReservasScreen from './src/screens/Reservas';
 import { Colores } from './src/ui';
 
+const TITULOS: Record<string, string> = {
+  Producto: 'Detalle del producto', ProbadorAR: 'Vestidor virtual', Reservar: 'Reservar una visita',
+  Checkout: 'Finalizar compra', Pago: 'Pago', Pedidos: 'Mis pedidos', Reservas: 'Mis reservas',
+  Auth: 'Tu cuenta', Asistente: 'Asistente de estilo', Ayuda: 'Centro de ayuda',
+  Onboarding: 'Bienvenida', Panel: 'Panel de gestión', Maestros: 'Sucursales y promociones',
+  Notificaciones: 'Notificaciones',
+};
+
 const TABS: Array<{ id: TabName; etiqueta: string; icono: string }> = [
   { id: 'inicio', etiqueta: 'Inicio', icono: '⌂' },
   { id: 'catalogo', etiqueta: 'Catálogo', icono: '◈' },
@@ -40,11 +52,11 @@ const TABS: Array<{ id: TabName; etiqueta: string; icono: string }> = [
   { id: 'cuenta', etiqueta: 'Cuenta', icono: '◉' },
 ];
 
-function ToastOverlay() {
+function ToastOverlay({ bottom }: { bottom: number }) {
   const { toast } = useApp();
   if (!toast) return null;
   return (
-    <View pointerEvents="none" style={estilos.toast}>
+    <View pointerEvents="none" accessibilityLiveRegion="polite" style={[estilos.toast, { bottom }]}>
       <Text style={estilos.toastTexto}>{toast}</Text>
     </View>
   );
@@ -60,10 +72,13 @@ function Root() {
     usuario,
     carrito,
     tenantSlug,
+    sincronizar,
   } = useApp();
   const nav = useNav();
+  const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
   const compacto = width < 370;
+  const [tecladoVisible, setTecladoVisible] = useState(false);
   const totalCarrito = carrito.reduce((sum, item) => sum + Number(item.cantidad || 0), 0);
 
   useEffect(() => {
@@ -78,6 +93,28 @@ function Root() {
     // Solo al terminar la carga inicial.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cargandoSesion]);
+
+  // La barra inferior desaparece mientras el teclado está abierto para dejar
+  // espacio real a los formularios y evitar que tape botones o campos.
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const show = Keyboard.addListener(showEvent, () => setTecladoVisible(true));
+    const hide = Keyboard.addListener(hideEvent, () => setTecladoVisible(false));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
+
+  // Botón Atrás de Android: cierra primero la pantalla secundaria, luego vuelve
+  // a Inicio. Solo permite salir cuando ya estamos en la raíz de Inicio.
+  useEffect(() => {
+    if (Platform.OS !== 'android') return undefined;
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (nav.stack.length > 0) { nav.pop(); return true; }
+      if (nav.tab !== 'inicio') { nav.setTab('inicio'); return true; }
+      return false;
+    });
+    return () => subscription.remove();
+  }, [nav.stack.length, nav.tab, nav.pop, nav.setTab]);
 
   if (cargandoSesion) {
     return (
@@ -123,10 +160,13 @@ function Root() {
   };
 
   const stackAbierto = nav.stack.length > 0;
-  const tituloStack = nav.stack[nav.stack.length - 1]?.name;
+  const nombreStack = nav.stack[nav.stack.length - 1]?.name;
+  const tituloStack = nombreStack ? TITULOS[nombreStack] : undefined;
+  const mostrarTabs = !stackAbierto && !tecladoVisible;
+  const separacionToast = mostrarTabs ? 66 + Math.max(insets.bottom, 4) : 14 + (tecladoVisible ? 0 : Math.max(insets.bottom, 0));
 
   return (
-    <SafeAreaView style={estilos.safe} edges={['top', 'bottom']}>
+    <SafeAreaView style={estilos.safe} edges={['top']}>
       <StatusBar style="light" backgroundColor={Colores.oscuro} />
       <View style={estilos.header}>
         <View style={estilos.headerIdentidad}>
@@ -135,14 +175,15 @@ function Root() {
               onPress={nav.pop}
               accessibilityRole="button"
               accessibilityLabel="Volver a la pantalla anterior"
+              hitSlop={8}
               style={estilos.backButton}
             >
               <Text style={estilos.backText}>‹</Text>
             </TouchableOpacity>
           ) : null}
           <View style={{ flexShrink: 1 }}>
-            <Text style={estilos.headerBrand}>{stackAbierto ? tituloStack : 'FASHIONSTORE'}</Text>
-            {!stackAbierto ? <Text style={estilos.headerTenant}>TIENDA / {tenantSlug.toUpperCase()}</Text> : null}
+            <Text style={estilos.headerBrand}>{stackAbierto ? tituloStack : 'FashionStore'}</Text>
+            {!stackAbierto ? <Text style={estilos.headerTenant}>Tienda {tenantSlug}</Text> : null}
           </View>
         </View>
         <View style={estilos.headerAcciones}>
@@ -151,30 +192,41 @@ function Root() {
             {!compacto && <Text style={estilos.pillText}>{online ? 'EN LÍNEA' : 'SIN RED'}</Text>}
           </View>
           {pendientes > 0 && (
-            <View style={estilos.pendingPill}>
+            <TouchableOpacity
+              accessibilityRole="button"
+              accessibilityLabel={`${pendientes} operaciones pendientes. Toca para sincronizar`}
+              disabled={!online}
+              onPress={() => { void sincronizar(); }}
+              activeOpacity={0.8}
+              style={[estilos.pendingPill, !online && { opacity: 0.6 }]}
+            >
               <Text style={estilos.pillText}>↻ {pendientes}</Text>
-            </View>
+            </TouchableOpacity>
           )}
           {usuario ? (
             <TouchableOpacity
               accessibilityRole="button"
               accessibilityLabel="Ver notificaciones"
               onPress={() => nav.push('Notificaciones')}
+              activeOpacity={0.8}
+              hitSlop={4}
               style={estilos.headerIconButton}
             >
               <Text style={{ color: '#FFFFFF', fontSize: 17 }}>🔔</Text>
             </TouchableOpacity>
           ) : null}
-          {!stackAbierto && totalCarrito > 0 && (
-            <View style={estilos.cartCount}><Text style={estilos.cartCountText}>{totalCarrito}</Text></View>
-          )}
         </View>
       </View>
 
-      <View style={estilos.contenido}>{stackAbierto ? renderStack() : renderTab()}</View>
+      <KeyboardAvoidingView
+        style={[estilos.contenido, stackAbierto && !tecladoVisible ? { paddingBottom: insets.bottom } : null]}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        {stackAbierto ? renderStack() : renderTab()}
+      </KeyboardAvoidingView>
 
-      {!stackAbierto && (
-        <View style={estilos.tabBar}>
+      {mostrarTabs && (
+        <View style={[estilos.tabBar, { paddingBottom: Math.max(insets.bottom, 4) }]}>
           {TABS.map((tab) => {
             const activo = nav.tab === tab.id;
             const label = tab.id === 'carrito' && totalCarrito > 0 ? `Carrito · ${totalCarrito}` : tab.etiqueta;
@@ -183,19 +235,24 @@ function Root() {
                 key={tab.id}
                 style={[estilos.tabItem, compacto && { paddingHorizontal: 1 }]}
                 onPress={() => nav.setTab(tab.id)}
-                accessibilityRole="button"
+                activeOpacity={0.78}
+                accessibilityRole="tab"
+                accessibilityLabel={label}
                 accessibilityState={{ selected: activo }}
               >
                 <View style={[estilos.tabIconWrap, activo && estilos.tabIconActivo]}>
                   <Text style={[estilos.tabIcon, activo && estilos.tabIconSelected]}>{tab.icono}</Text>
+                  {tab.id === 'carrito' && totalCarrito > 0 ? (
+                    <View style={estilos.cartCount}><Text style={estilos.cartCountText}>{totalCarrito > 99 ? '99+' : totalCarrito}</Text></View>
+                  ) : null}
                 </View>
-                <Text numberOfLines={1} style={[estilos.tabEtiqueta, activo && estilos.tabEtiquetaActiva]}>{label}</Text>
+                <Text numberOfLines={1} style={[estilos.tabEtiqueta, activo && estilos.tabEtiquetaActiva]}>{tab.etiqueta}</Text>
               </TouchableOpacity>
             );
           })}
         </View>
       )}
-      <ToastOverlay />
+      <ToastOverlay bottom={separacionToast} />
     </SafeAreaView>
   );
 }
@@ -233,8 +290,8 @@ const estilos = StyleSheet.create({
   headerTenant: { color: '#AEB9B8', fontWeight: '700', fontSize: 9, letterSpacing: 1, marginTop: 3 },
   headerAcciones: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   backButton: {
-    width: 38,
-    height: 38,
+    width: 44,
+    height: 44,
     borderRadius: 12,
     backgroundColor: 'rgba(255,255,255,0.09)',
     alignItems: 'center',
@@ -245,8 +302,8 @@ const estilos = StyleSheet.create({
   dot: { width: 6, height: 6, borderRadius: 3 },
   pendingPill: { backgroundColor: '#87572F', borderRadius: 30, paddingHorizontal: 9, paddingVertical: 6 },
   pillText: { color: '#FFFFFF', fontWeight: '800', fontSize: 9, letterSpacing: 0.3 },
-  headerIconButton: { width: 36, height: 36, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.1)' },
-  cartCount: { minWidth: 22, height: 22, borderRadius: 11, backgroundColor: Colores.acento, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 5 },
+  headerIconButton: { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.1)' },
+  cartCount: { position: 'absolute', top: -3, right: -4, minWidth: 19, height: 19, borderRadius: 11, backgroundColor: Colores.acento, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 5 },
   cartCountText: { color: '#FFFFFF', fontSize: 10, fontWeight: '900' },
   contenido: { flex: 1, backgroundColor: Colores.fondo },
   tabBar: {
@@ -262,8 +319,8 @@ const estilos = StyleSheet.create({
     shadowOffset: { width: 0, height: -3 },
     elevation: 8,
   },
-  tabItem: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 2, minHeight: 51, gap: 2 },
-  tabIconWrap: { minWidth: 35, height: 27, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  tabItem: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 4, minHeight: 56, gap: 3 },
+  tabIconWrap: { position: 'relative', minWidth: 42, height: 30, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   tabIconActivo: { backgroundColor: Colores.acentoSuave },
   tabIcon: { fontSize: 19, color: '#77818B', fontWeight: '700' },
   tabIconSelected: { color: Colores.acento },
@@ -271,7 +328,6 @@ const estilos = StyleSheet.create({
   tabEtiquetaActiva: { color: Colores.acentoOscuro },
   toast: {
     position: 'absolute',
-    bottom: 82,
     left: 16,
     right: 16,
     backgroundColor: 'rgba(23,37,43,0.97)',

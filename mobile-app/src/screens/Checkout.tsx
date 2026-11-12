@@ -86,7 +86,7 @@ export const CheckoutScreen: React.FC = () => {
   };
 
   return (
-    <ScrollView style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
+    <ScrollView keyboardShouldPersistTaps="handled" style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
       <Encabezado
         titulo="💳 Checkout de prueba"
         subtitulo="Ningún pedido se marca pagado por una respuesta del teléfono; el backend valida la confirmación del proveedor."

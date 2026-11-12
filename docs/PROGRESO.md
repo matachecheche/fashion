@@ -80,3 +80,21 @@
 - Parseo TypeScript/TSX con `transpileModule`: 28/28 archivos sin errores de sintaxis y sin imports relativos rotos. Esto no sustituye `tsc --noEmit` con todas las dependencias instaladas.
 - `npm ci` no pudo terminar en este entorno porque no se pudo resolver/descargar desde `registry.npmjs.org`; por tanto no se declara typecheck integral ni compilación Gradle/Expo completada aquí. Además, no hay Android SDK ni configuración de API/keystore de la organización para producir y probar un APK real en esta sesión.
 - El workflow Azure está preparado para producir `FashionStore-<versión>-<BuildId>.apk` como RELEASE autónomo, pero el propietario aún debe configurar el grupo de variables `fashionstore-mobile`, el endpoint público HTTPS de NestJS y una clave privada de firma estable, y ejecutar el pipeline dentro de su Azure DevOps.
+
+
+## Versión móvil 2.2.0 — Ergonomía Android y responsive
+
+- Se oculta la navegación inferior mientras el teclado está abierto para que no cubra formularios ni botones.
+- Se respeta el inset inferior del sistema Android; la barra inferior queda separada de la navegación por gestos.
+- El botón Atrás físico de Android cierra primero pantallas secundarias y regresa a Inicio antes de permitir salir.
+- Se aumentaron objetivos táctiles del encabezado y se añadieron etiquetas accesibles para pestañas y controles de sincronización.
+- Las listas y formularios preservan los toques al interactuar con el teclado (`keyboardShouldPersistTaps`).
+- Se actualizaron los estilos responsive de la web: navegación horizontal táctil, grids de dos columnas en móviles, controles con altura mínima y mejor área segura para el asistente flotante.
+- Se documentó el uso del dominio web con `/api` como URL de la app cuando el proxy Nginx de Azure está activo; el proceso de build confirma el healthcheck antes de compilar.
+- La versión comercial de la app pasa a `2.2.0` y el `versionCode` base a `24`. La versión de CI mantiene la numeración automática del pipeline.
+
+## Límites de verificación de 2.2.0
+
+- La suite Python del repositorio se ejecuta localmente y valida regresiones funcionales, configuración y paquete.
+- La comprobación TSX de sintaxis/imports se realiza sin reemplazar el typecheck estricto con dependencias instaladas.
+- La compilación nativa release, firma estable y prueba en dispositivo deben confirmarse en Azure usando la API y el keystore del propietario.

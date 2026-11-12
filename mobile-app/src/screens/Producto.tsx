@@ -52,7 +52,7 @@ export const ProductoScreen: React.FC<{ navParams?: any }> = ({ navParams }) => 
   const imagen = varianteSel?.foto_url || producto.imagen_url;
 
   return (
-    <ScrollView style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
+    <ScrollView keyboardShouldPersistTaps="handled" style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
       <Image
         source={{ uri: apiAssetUrl(imagen) }}
         style={{

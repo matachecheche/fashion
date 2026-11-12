@@ -78,7 +78,7 @@ export const CatalogoScreen: React.FC = () => {
           onChangeText={setQ}
           autoCapitalize="none"
         />
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 12 }} contentContainerStyle={{ gap: 8, paddingRight: 6 }}>
+        <ScrollView keyboardShouldPersistTaps="handled" horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 12 }} contentContainerStyle={{ gap: 8, paddingRight: 6 }}>
           {TIPOS.map((t) => (
             <TouchableOpacity
               key={t}
@@ -112,7 +112,7 @@ export const CatalogoScreen: React.FC = () => {
           <ActivityIndicator size="large" color={Colores.acento} />
         </View>
       ) : (
-        <ScrollView contentContainerStyle={{ width: '100%', maxWidth: 980, alignSelf: 'center', paddingHorizontal: 18, paddingTop: 8, paddingBottom: 30 }}>
+        <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ width: '100%', maxWidth: 980, alignSelf: 'center', paddingHorizontal: 18, paddingTop: 8, paddingBottom: 30 }}>
           <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap }}>
             {productos.map((p) => (
               <TouchableOpacity

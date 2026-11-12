@@ -159,7 +159,7 @@ export const PagoScreen: React.FC<{ navParams?: any }> = ({ navParams }) => {
   const stripeTestActivo = esPagoStripe && stripeCheckoutHabilitado;
 
   return (
-    <ScrollView style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
+    <ScrollView keyboardShouldPersistTaps="handled" style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
       <Encabezado
         titulo={stripeTestActivo ? 'Tarjeta de prueba — Stripe Checkout' : `Simulador de pago (${String(pago.pasarela || '').toUpperCase()})`}
         subtitulo={`Comprobante: ${pago.numero_comprobante || `#${ventaId}`} · Ref: ${pago.referencia_externa}`}

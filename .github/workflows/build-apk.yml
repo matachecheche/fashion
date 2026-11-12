@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       api_url:
-        description: 'URL pública HTTPS de la API NestJS, terminada en /api (ej. https://xxx.azurecontainerapps.io/api)'
+        description: 'URL pública HTTPS de la API terminada en /api. También sirve el dominio web + /api si Nginx proxya la API.'
         required: false
         type: string
 

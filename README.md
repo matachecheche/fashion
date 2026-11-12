@@ -296,3 +296,8 @@ rota todos los secretos, usa dominios propios y valida cumplimiento tributario b
 El chat de la web y el de la app móvil comparten `POST /api/ia/chat` en NestJS. Nest consulta PostgreSQL con tenant, JWT, RLS y permisos de solo lectura; envía a FastAPI únicamente un contexto reducido y saneado. FastAPI usa la guía funcional de FashionStore más ese contexto para responder: Groq y Gemini pueden trabajar simultáneamente con fallback entre proveedores. La IA no recibe credenciales ni conexión SQL, no ejecuta consultas generadas por el modelo y no modifica datos. Las fuentes incluyen catálogo, inventario/almacenes, sucursales, ventas, reservas, pagos, devoluciones, POS, proveedores, cuentas por cobrar, sincronización offline, suscripciones, webhooks y analítica autorizada por rol.
 
 Configura `GROQ_API_KEY`, `GEMINI_API_KEY` y la misma `IA_INTERNAL_KEY` en los backends, preferiblemente como secretos de Azure Container Apps. Sin claves de proveedor se mantiene el modo local para respuestas deterministas, pero no se dispone de conversación generativa completa. Consulta [docs/IA-ASISTENTE.md](docs/IA-ASISTENTE.md) para arquitectura, límites, roles y pruebas.
+
+
+## APK Android 2.2.0
+
+La app Android se compila como APK `release` autónomo (sin Metro) desde GitHub Actions o Azure DevOps. Sigue `docs/APK-AZURE.md` para configurar `EXPO_PUBLIC_API_URL`, validar `/api/health` y conservar la firma Android entre versiones. Si la instancia de Azure usa el proxy Nginx incluido, puedes usar el dominio público de la web terminado en `/api` como base de API móvil.

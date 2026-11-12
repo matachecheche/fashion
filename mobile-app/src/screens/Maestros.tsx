@@ -203,7 +203,7 @@ export const MaestrosScreen: React.FC = () => {
               <Text style={Estilos.label}>Nombre</Text>
               <TextInput style={Estilos.input} value={formCat.nombre} onChangeText={(v) => setFormCat((s) => ({ ...s, nombre: v }))} placeholder="Colección de verano" placeholderTextColor="#92999E" />
               <Text style={[Estilos.label, { marginTop: 10 }]}>Tipo de prenda</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 7, paddingVertical: 5 }}>
+              <ScrollView keyboardShouldPersistTaps="handled" horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 7, paddingVertical: 5 }}>
                 {TIPOS.map((type) => {
                   const active = formCat.tipo_prenda === type;
                   return <TouchableOpacity key={type} onPress={() => setFormCat((s) => ({ ...s, tipo_prenda: type }))} style={{ paddingVertical: 9, paddingHorizontal: 12, borderRadius: 999, backgroundColor: active ? Colores.oscuro : Colores.superficie }}><Text style={{ color: active ? '#FFFFFF' : Colores.texto, fontSize: 11, fontWeight: '800' }}>{type.toUpperCase()}</Text></TouchableOpacity>;

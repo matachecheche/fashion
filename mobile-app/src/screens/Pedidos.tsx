@@ -131,7 +131,7 @@ export const PedidosScreen: React.FC = () => {
       <View style={{ padding: 16, paddingBottom: 0 }}>
         <Encabezado titulo="Mis pedidos y comprobantes" subtitulo="Historial de compras y estado de pago confirmado por el servidor." />
       </View>
-      <FlatList
+      <FlatList keyboardShouldPersistTaps="handled"
         data={pedidos}
         keyExtractor={(item) => String(item.id)}
         contentContainerStyle={{ padding: 16, paddingTop: 6, paddingBottom: 36, width: '100%', maxWidth: 980, alignSelf: 'center', flexGrow: 1 }}

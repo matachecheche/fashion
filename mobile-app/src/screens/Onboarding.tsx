@@ -66,7 +66,7 @@ export const OnboardingScreen: React.FC = () => {
   };
 
   return (
-    <ScrollView style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
+    <ScrollView keyboardShouldPersistTaps="handled" style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
       <Encabezado
         titulo="🚀 Crear mi tienda SaaS"
         subtitulo="Trial gratuito de 14 días · sin tarjeta · sin cobros"

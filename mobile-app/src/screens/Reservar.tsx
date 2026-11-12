@@ -80,7 +80,7 @@ export const ReservarScreen: React.FC<{ navParams?: any }> = ({ navParams }) => 
   };
 
   return (
-    <ScrollView style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
+    <ScrollView keyboardShouldPersistTaps="handled" style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
       <Encabezado
         titulo="📅 Reservar en Sucursal"
         subtitulo="El stock queda retenido temporalmente para tu cita de atención."

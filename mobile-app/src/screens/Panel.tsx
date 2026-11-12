@@ -1188,7 +1188,7 @@ export const PanelScreen: React.FC = () => {
 
   if (module === 'menu') {
     return (
-      <ScrollView style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
+      <ScrollView keyboardShouldPersistTaps="handled" style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
         <Encabezado titulo="Panel operativo" subtitulo={`${usuario.nombre || usuario.email} · ${role} · /${tenantSlug}`} />
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>
           <View style={{ width: 9, height: 9, borderRadius: 5, backgroundColor: online ? Colores.ok : Colores.error }} />
@@ -1219,7 +1219,7 @@ export const PanelScreen: React.FC = () => {
   }
 
   return (
-    <FlatList
+    <FlatList keyboardShouldPersistTaps="handled"
       style={Estilos.contenedor}
       contentContainerStyle={{ padding: 16, paddingBottom: 36, width: '100%', maxWidth: 980, alignSelf: 'center' }}
       data={rows}

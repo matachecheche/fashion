@@ -11,12 +11,30 @@ El pipeline de este repositorio genera un **APK de la variante RELEASE** en un a
 - APK firmado con el mismo keystore privado en Azure cuando se configuran los cuatro secretos de firma. La clave temporal queda solo como fallback de prueba y no conserva la identidad entre agentes hospedados.
 - Artefacto Azure Pipelines llamado `FashionStore-APK`, con el APK y `INFORMACION-BUILD.txt` (commit, versión, tamaño y SHA-256).
 
+## URL correcta de la API cuando solo tienes la dirección de la web
+
+El despliegue de FashionStore configura Nginx en la app web con un proxy público para `/api/` y para `/assets/prendas/`. Por eso, cuando la URL pública del frontend es la única que tienes, puedes usar el mismo dominio web seguido de `/api` como URL de la app móvil, siempre que el healthcheck responda correctamente.
+
+Ejemplo para la instancia compartida por el propietario del proyecto:
+
+```text
+https://fashionstore-web-4edbf7.orangerock-f50972dc.chilecentral.azurecontainerapps.io/api
+```
+
+Antes de compilar, abre esta dirección en el navegador (añadiendo `/health` al final):
+
+```text
+https://fashionstore-web-4edbf7.orangerock-f50972dc.chilecentral.azurecontainerapps.io/api/health
+```
+
+Debe devolver JSON con `estado: "ok"` y `servicio: "fashionstore-backend-nest"`. Si no lo devuelve, no uses esa URL en la compilación: revisa el Ingress de la app web y el valor `API_UPSTREAM`, o usa el FQDN público directo de NestJS terminado en `/api`.
+
 ## Configuración única en Azure DevOps Services
 
 1. Sube el proyecto completo a GitHub, incluyendo `azure-pipelines-apk.yml` y `mobile-app/ci/build-azure-apk.sh`.
 2. En Azure DevOps Services, crea o abre un proyecto.
 3. En **Pipelines → Library → Variable groups → Add**, crea el grupo `fashionstore-mobile`.
-4. Agrega `EXPO_PUBLIC_API_URL` como variable no secreta, con la URL pública HTTPS del backend NestJS terminada en `/api`, por ejemplo `https://<tu-api>.azurecontainerapps.io/api`. Autoriza el uso del grupo por el pipeline.
+4. Agrega `EXPO_PUBLIC_API_URL` como variable no secreta, con la URL pública HTTPS de la API terminada en `/api`. Puede ser el FQDN directo de NestJS o el dominio de la web más `/api` si el proxy Nginx de Azure está activo. Autoriza el uso del grupo por el pipeline.
 5. En **Pipelines → New pipeline**, conecta el repositorio GitHub y elige **Existing Azure Pipelines YAML file**: `/azure-pipelines-apk.yml`.
 6. Guarda el pipeline. La variable de URL se configura una sola vez; las ejecuciones siguientes solo requieren pulsar **Run pipeline**.
 

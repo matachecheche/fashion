@@ -310,3 +310,151 @@ textarea {
   bottom: 1.25rem;
   z-index: 50;
 }
+
+
+/* Ergonomía táctil y responsive: reglas transversales, sin alterar la lógica de las pantallas. */
+button,
+.fs-btn,
+.fs-nav-link,
+.fs-sidebar-link,
+[role="button"] {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+.fs-btn {
+  min-height: 44px;
+}
+
+.fs-btn-sm {
+  min-height: 40px;
+}
+
+.fs-input,
+.fs-select {
+  min-height: 46px;
+}
+
+.fs-textarea {
+  min-height: 100px;
+}
+
+.fs-nav-link,
+.fs-sidebar-link {
+  min-height: 42px;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid rgba(180, 83, 9, 0.35);
+  outline-offset: 2px;
+}
+
+.fs-table-wrap {
+  max-width: 100%;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 640px) {
+  .fs-container {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .fs-header-inner {
+    min-height: 0;
+    align-items: flex-start;
+    gap: 0.65rem;
+    padding: 0.75rem 0;
+  }
+
+  .fs-brand {
+    flex-shrink: 0;
+    font-size: 1rem;
+  }
+
+  .fs-nav {
+    width: 100%;
+    max-width: 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0.15rem 0 0.35rem;
+    scrollbar-width: thin;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .fs-nav-link {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding: 0.55rem 0.8rem;
+  }
+
+  .fs-grid-catalog {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem;
+  }
+
+  .fs-grid-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem;
+  }
+
+  .fs-card {
+    padding: 1rem;
+  }
+
+  .fs-panel-layout {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: auto;
+  }
+
+  .fs-sidebar {
+    position: relative;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    gap: 0.35rem;
+    padding: 0.65rem 0.75rem;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .fs-sidebar-link {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    padding: 0.65rem 0.8rem;
+  }
+
+  .fs-fab-assistant {
+    right: 0.75rem;
+    bottom: max(0.75rem, env(safe-area-inset-bottom));
+  }
+
+  .fs-banner-trial {
+    align-items: flex-start;
+    padding: 0.7rem 1rem;
+  }
+
+  .fs-banner-trial > div {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .fs-table th,
+  .fs-table td {
+    padding: 0.65rem 0.7rem;
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 380px) {
+  .fs-grid-catalog,
+  .fs-grid-kpis {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

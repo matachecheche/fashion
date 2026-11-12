@@ -19,7 +19,7 @@ API_BASE_URL="${API_BASE_URL%/}"
 
 [[ -n "$API_BASE_URL" ]] || fail "Falta EXPO_PUBLIC_API_URL. Crea la variable en el grupo Azure DevOps 'fashionstore-mobile'."
 [[ "$API_BASE_URL" == https://* ]] || fail "EXPO_PUBLIC_API_URL debe utilizar HTTPS. Valor recibido: $API_BASE_URL"
-[[ "$API_BASE_URL" == */api ]] || fail "EXPO_PUBLIC_API_URL debe terminar en /api. Ejemplo: https://fashionstore-api.example.azurecontainerapps.io/api"
+[[ "$API_BASE_URL" == */api ]] || fail "EXPO_PUBLIC_API_URL debe terminar en /api. Ejemplo: https://tu-dominio-web.azurecontainerapps.io/api o el FQDN directo de NestJS"
 
 command -v node >/dev/null 2>&1 || fail "Node.js no está disponible en el agente Azure."
 command -v npm >/dev/null 2>&1 || fail "npm no está disponible en el agente Azure."

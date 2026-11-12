@@ -38,7 +38,7 @@ export const ReservasScreen: React.FC = () => {
   const offlineReservas = cola.filter((x) => x.tipo === 'reserva');
 
   return (
-    <ScrollView
+    <ScrollView keyboardShouldPersistTaps="handled"
       style={Estilos.contenedor}
       contentContainerStyle={Estilos.scroll}
       refreshControl={<RefreshControl refreshing={cargando} onRefresh={cargar} tintColor={Colores.acento} />}

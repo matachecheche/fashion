@@ -4,7 +4,7 @@ import { MANUAL_SECCIONES } from '../manual';
 import { Colores, Encabezado, Estilos, Tarjeta } from '../ui';
 
 export const AyudaScreen: React.FC = () => (
-  <ScrollView style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
+  <ScrollView keyboardShouldPersistTaps="handled" style={Estilos.contenedor} contentContainerStyle={Estilos.scroll}>
     <Encabezado
       titulo="❓ Centro de Ayuda"
       subtitulo="Guía rápida del ecosistema FashionStore (disponible offline)."
