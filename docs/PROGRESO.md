@@ -116,3 +116,23 @@
 - La suite Python del repositorio pasa 120 pruebas.
 - NestJS no pudo completar `npm ci`/`npm run build` en este entorno por timeout de descarga de dependencias. El CI de GitHub debe confirmar el build TypeScript real.
 - El diagnóstico HTTP 503 permite identificar el problema real de PostgreSQL después de desplegar la imagen nueva; aún no se puede identificar la causa específica de la instancia Azure solo con el HTTP 500 anterior.
+
+
+## Versión 2.3.0 — IA generativa real y respuestas mejoradas
+
+- Las consultas conversacionales del catálogo, recomendaciones y análisis de negocio usan Groq/Gemini con contexto PostgreSQL verificado; los conteos exactos y listados operativos autorizados mantienen respuesta determinista.
+- Se reforzó el prompt para comparaciones de prendas, recomendaciones útiles y análisis comercial basado en métricas, sin inventar datos ni romper el aislamiento multi-tenant.
+- Groq prioriza GPT-OSS 120B con razonamiento alto cuando está habilitado; Gemini prioriza 3.8 Flash.
+- La API devuelve proveedor, modelo y diagnósticos seguros cuando se activa el fallback local.
+- La bienvenida web ya no se etiqueta erróneamente como motor local antes de enviar una consulta.
+- Versión móvil 2.3.0, versionCode 27.
+
+## Versión móvil 2.3.0 — IA generativa y diagnóstico Azure
+
+- Las consultas conversacionales sobre catálogo, recomendaciones y estilo pasan al LLM con el contexto tenant-scoped de PostgreSQL. Conteos exactos y listados operativos con permisos permanecen deterministas.
+- Se reforzó el prompt del asesor para dar recomendaciones específicas, comparar productos disponibles, razonar sobre estilo y separar datos verificados de interpretación.
+- Groq prioriza GPT-OSS 120B con razonamiento alto; Gemini prioriza Gemini 3.8 Flash. La selección consulta los modelos habilitados y conserva alternativas.
+- Se ampliaron los límites de generación y se añadieron diagnósticos sanitizados para claves ausentes, fallos de proveedor y proxy NestJS–FastAPI.
+- Web y Android muestran proveedor/modelo y motivo del fallback; el saludo inicial web no afirma incorrectamente que el motor sea local.
+- Versión móvil `2.3.0`, Android `versionCode=27`.
+- Guía de publicación y actualización de revisiones Azure: `docs/IA-GENERATIVA-AZURE.md`.

@@ -7,6 +7,18 @@ import { assistantContextSources, assistantSuggestedProducts, buildAssistantData
 const FASTAPI_BASE_URL = (process.env.FASTAPI_URL || 'http://127.0.0.1:8000').replace(/\/+$/, '');
 const INTERNAL_IA_KEY = process.env.IA_INTERNAL_KEY || '';
 
+function diagnosticoFastApi(error: any): string {
+  const code = String(error?.cause?.code || error?.code || '').toUpperCase();
+  if (error?.name === 'AbortError' || code === 'ABORT_ERR') return 'FASTAPI_TIMEOUT';
+  if (/^[A-Z0-9_]{2,32}$/.test(code)) return `FASTAPI_NETWORK_${code}`;
+  const status = Number(String(error?.message || '').match(/HTTP\s+(\d{3})/i)?.[1] || 0);
+  if (status === 401) return 'FASTAPI_INTERNAL_KEY_REJECTED';
+  if (status === 403) return 'FASTAPI_TENANT_REJECTED';
+  if (status === 404) return 'FASTAPI_ROUTE_NOT_FOUND';
+  if (status >= 500) return 'FASTAPI_INTERNAL_ERROR';
+  return 'FASTAPI_REQUEST_FAILED';
+}
+
 export async function invocarFastApi(
   path: string,
   options: { method?: 'GET' | 'POST'; body?: any; query?: Record<string, any>; timeoutMs?: number } = {},
@@ -60,7 +72,7 @@ export class IaController {
     try {
       const data = await invocarFastApi('/asistente/estado', {
         query: probar === 'true' ? { probar: 'true' } : undefined,
-        timeoutMs: probar === 'true' ? 60000 : 9000,
+        timeoutMs: probar === 'true' ? 120000 : 9000,
       });
       return {
         ...data,
@@ -68,14 +80,14 @@ export class IaController {
         tenant_slug: tenant.tenantSlug,
       };
     } catch (error: any) {
-      const code = typeof error?.cause?.code === 'string' ? error.cause.code : undefined;
-      console.warn('[FashionStore IA] No se pudo consultar el estado de FastAPI:', code || error?.name || 'error');
+      const diagnostic = diagnosticoFastApi(error);
+      console.warn('[FashionStore IA] No se pudo consultar el estado de FastAPI:', diagnostic);
       return {
         tenant_slug: tenant.tenantSlug,
         modo: 'local',
         proveedor: 'local_rules',
         proxy: 'nestjs-local-fallback',
-        diagnostico: 'FASTAPI_NO_DISPONIBLE',
+        diagnostico: diagnostic,
       };
     }
   }
@@ -155,7 +167,7 @@ export class IaController {
           historial,
           contexto,
         },
-        timeoutMs: 25000,
+        timeoutMs: 55000,
       });
       return {
         ...res,
@@ -166,13 +178,16 @@ export class IaController {
         },
         sugerencias: res.productos_sugeridos || res.sugerencias || [],
       };
-    } catch {
+    } catch (error: any) {
+      const diagnostic = diagnosticoFastApi(error);
+      console.warn('[FashionStore IA] Chat generativo no disponible:', diagnostic);
       return {
         tenant_slug: tenant.tenantSlug,
         sesion_id: sesionId,
         intencion: 'consulta_datos',
         modo_ia: 'local',
         proveedor: 'local_rules',
+        diagnostico: diagnostic,
         respuesta: buildAssistantLocalReply(questionForContext, contexto),
         datos_consultados: {
           base_datos: Boolean(contexto.base_datos_disponible),

@@ -7,6 +7,10 @@ construida como SaaS multi-tenant (varias tiendas en una sola instancia).
 > Moneda: **BOB (Bs)**. Cobros: **modo SANDBOX** (sin dinero real) en esta entrega.
 > Ningún cobro, facturación ni despacho aquí mueve dinero ni mercancía real.
 
+## Asistente IA en Azure
+
+Para publicar la nueva versión generativa y actualizar las revisiones de Azure Container Apps, sigue [docs/IA-GENERATIVA-AZURE.md](docs/IA-GENERATIVA-AZURE.md). Un CI verde por sí solo no despliega las imágenes en Azure.
+
 ## Qué incluye
 
 | Capa | Tecnología | Puerto |
@@ -298,7 +302,7 @@ El chat de la web y el de la app móvil comparten `POST /api/ia/chat` en NestJS.
 Configura `GROQ_API_KEY`, `GEMINI_API_KEY` y la misma `IA_INTERNAL_KEY` en los backends, preferiblemente como secretos de Azure Container Apps. Sin claves de proveedor se mantiene el modo local para respuestas deterministas, pero no se dispone de conversación generativa completa. Consulta [docs/IA-ASISTENTE.md](docs/IA-ASISTENTE.md) para arquitectura, límites, roles y pruebas.
 
 
-## APK Android 2.2.2
+## APK Android 2.3.0
 
 La app Android se compila como APK `release` autónomo (sin Metro) desde GitHub Actions o Azure DevOps. Los workflows usan acciones actualizadas compatibles con el runtime Node 24 de GitHub Actions, manteniendo Node 20.19 para Expo SDK 54. Sigue `docs/APK-AZURE.md` para configurar `EXPO_PUBLIC_API_URL`, validar `/api/health` y conservar la firma Android entre versiones. Si la instancia de Azure usa el proxy Nginx incluido, puedes usar el dominio público de la web terminado en `/api` como base de API móvil.
 

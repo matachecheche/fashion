@@ -11,6 +11,10 @@ interface Mensaje {
   proveedor?: string;
   fuentes?: string[];
   baseDatos?: boolean;
+  modelo?: string | null;
+  modoRespuesta?: string;
+  diagnostico?: string;
+  erroresProveedor?: Record<string, string>;
 }
 
 const SUGERENCIAS = [
@@ -58,6 +62,10 @@ export const AsistenteScreen: React.FC = () => {
           rol: 'assistant',
           texto: String(respuesta),
           proveedor: String(res?.proveedor || res?.modo_ia || 'local_rules'),
+          modelo: res?.modelo ? String(res.modelo) : null,
+          modoRespuesta: String(res?.modo_respuesta || ''),
+          diagnostico: String(res?.diagnostico || ''),
+          erroresProveedor: res?.errores_proveedor && typeof res.errores_proveedor === 'object' ? res.errores_proveedor : {},
           fuentes: Array.isArray(res?.datos_consultados?.fuentes) ? res.datos_consultados.fuentes : [],
           baseDatos: Boolean(res?.datos_consultados?.base_datos),
         },
@@ -119,9 +127,16 @@ export const AsistenteScreen: React.FC = () => {
             {item.rol === 'assistant' && item.proveedor ? (
               <View style={{ marginTop: 6 }}>
                 <Text style={{ color: '#64748b', fontSize: 10 }}>
-                  Motor: {item.proveedor === 'gemini' ? 'Gemini' : item.proveedor === 'groq' ? 'Groq' : 'Respuesta local'}
+                  Motor: {item.proveedor === 'gemini' ? 'Gemini' : item.proveedor === 'groq' ? 'Groq' : item.modoRespuesta === 'datos_verificados' ? 'Consulta verificada en tienda' : 'Respaldo local · IA generativa no disponible'}
+                  {item.modelo ? ` · ${item.modelo}` : ''}
                   {item.baseDatos === false ? ' · Base de datos no consultada' : item.baseDatos ? ' · Datos de tienda consultados' : ''}
                 </Text>
+                {!!item.diagnostico && (
+                  <Text style={{ color: '#9A3412', fontSize: 10, marginTop: 2 }}>Diagnóstico: {item.diagnostico}</Text>
+                )}
+                {Object.entries(item.erroresProveedor || {}).map(([motor, error]) => (
+                  <Text key={motor} style={{ color: '#9A3412', fontSize: 10, marginTop: 2 }}>{motor}: {String(error)}</Text>
+                ))}
                 {!!item.fuentes?.length && (
                   <Text style={{ color: '#64748b', fontSize: 10, marginTop: 2 }}>
                     Fuentes: {item.fuentes.join(', ')}

@@ -18,6 +18,7 @@ class TestLLMProviderFallback(unittest.TestCase):
         res = client.generate_text("Sistema", "¿Como funcionan las reservas y pagos QR?")
         self.assertEqual(res["provider"], "local_rules")
         self.assertIn("reserva", res["text"].lower())
+        self.assertEqual(res["diagnostico"], "LLM_KEYS_NOT_CONFIGURED")
 
     def test_groq_usa_bearer_y_descubre_modelo_habilitado(self) -> None:
         key = "gsk_" + "a" * 40
@@ -32,6 +33,9 @@ class TestLLMProviderFallback(unittest.TestCase):
                 body = json.loads(request.content)
                 self.assertEqual(body["model"], "openai/gpt-oss-20b")
                 self.assertIn("max_completion_tokens", body)
+                self.assertEqual(body["temperature"], 0.35)
+                if body["model"].startswith("openai/gpt-oss-"):
+                    self.assertEqual(body["reasoning_effort"], "high")
                 return httpx.Response(200, json={"choices": [{"message": {"content": "Hola desde Groq"}}]})
             return httpx.Response(404)
 

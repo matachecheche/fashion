@@ -18,13 +18,16 @@ export const AsistenteFlotante: React.FC = () => {
       sugerencias?: any[];
       fuentes?: string[];
       baseDatos?: boolean;
+      modelo?: string | null;
+      modoRespuesta?: string;
+      diagnostico?: string;
+      erroresProveedor?: Record<string, string>;
     }>
   >([
     {
       autor: 'ia',
       texto:
-        '¡Hola! Soy el Asesor Virtual IA de tu boutique. Puedo explicar FashionStore y consultar los datos autorizados de tu tienda.',
-      proveedor: 'local_rules',
+        '¡Hola! Soy el Asesor Virtual IA de tu boutique. Puedo ayudarte con combinaciones, tallas, recomendaciones y consultas sobre el catálogo y la operación de tu tienda.',
     },
   ]);
 
@@ -51,6 +54,10 @@ export const AsistenteFlotante: React.FC = () => {
           autor: 'ia',
           texto: res.respuesta,
           proveedor: res.proveedor || res.modo_ia || 'local_rules',
+          modelo: res.modelo || null,
+          modoRespuesta: res.modo_respuesta || '',
+          diagnostico: res.diagnostico || '',
+          erroresProveedor: res.errores_proveedor || {},
           sugerencias: res.sugerencias || res.productos_sugeridos || [],
           fuentes: res.datos_consultados?.fuentes || [],
           baseDatos: Boolean(res.datos_consultados?.base_datos),
@@ -136,10 +143,21 @@ export const AsistenteFlotante: React.FC = () => {
                       : m.proveedor === 'gemini'
                         ? 'Gemini'
                         : m.proveedor === 'local_rules'
-                          ? 'Local con datos de tienda'
-                          : 'Asistente offline'}
+                          ? (m.modoRespuesta === 'datos_verificados' ? 'Consulta verificada en tienda' : 'Respaldo local · IA generativa no disponible')
+                          : 'Sin conexión'}
+                    {m.modelo ? ` · ${m.modelo}` : ''}
                   </div>
                 )}
+                {m.diagnostico && (
+                  <div style={{ fontSize: '0.68rem', color: '#9a3412', marginTop: 3 }}>
+                    Diagnóstico técnico: {m.diagnostico}
+                  </div>
+                )}
+                {m.erroresProveedor && Object.entries(m.erroresProveedor).map(([motor, error]) => (
+                  <div key={motor} style={{ fontSize: '0.68rem', color: '#9a3412', marginTop: 2 }}>
+                    {motor}: {error}
+                  </div>
+                ))}
                 {m.baseDatos !== undefined && (
                   <div style={{ fontSize: '0.68rem', color: '#475569', marginTop: 3 }}>
                     {m.baseDatos ? 'Base de datos consultada' : 'Base de datos no consultada'}

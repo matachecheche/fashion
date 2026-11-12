@@ -98,3 +98,12 @@ Prueba con cuentas de distintos roles y comprueba que los resultados respeten su
 - Encargado: «¿Por qué hay movimientos de inventario que no cuadran?»; se consulta el historial de inventario y movimientos permitido.
 
 En cada respuesta revisa el indicador de base de datos y las fuentes consultadas. Una respuesta de conocimiento general no debe presentarse como dato verificado de la tienda.
+
+
+## Mejoras de inteligencia y diagnóstico (2.3.0)
+
+- Las preguntas conversacionales del catálogo, recomendaciones y análisis comercial se envían al modelo con contexto PostgreSQL de solo lectura. Los conteos exactos y los listados operativos autorizados siguen siendo deterministas para proteger las cifras.
+- Groq prioriza `openai/gpt-oss-120b` con `reasoning_effort=high` cuando está habilitado; continúa con Qwen 3.8 27B y GPT-OSS 20B como alternativas. Gemini prioriza Gemini 3.8 Flash y descubre los modelos habilitados para la clave.
+- Las respuestas incluyen proveedor, modelo y un código diagnóstico seguro cuando se activa el respaldo local. Las claves API nunca se muestran.
+- El timeout de generación se amplió para tolerar el cold-start de Azure Container Apps.
+- Tras cambiar NestJS/FastAPI, publica imágenes nuevas en GHCR y actualiza las revisiones de Container Apps. El workflow `CI — FashionStore` prueba y compila; no despliega Azure.

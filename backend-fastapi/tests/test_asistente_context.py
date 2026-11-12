@@ -20,6 +20,7 @@ from app.routers.asistente import (
     _is_exact_data_question,
     _is_troubleshooting_question,
     _prompt_con_contexto,
+    _requiere_respuesta_determinista,
     _local_reply,
 )
 
@@ -224,12 +225,20 @@ class TestAssistantContext(unittest.TestCase):
         self.assertIn("Bs. 1250.00", reply)
         self.assertIn("3 posiciones", reply)
 
+    def test_catalogue_browsing_uses_llm_but_exact_counts_stay_deterministic(self) -> None:
+        self.assertFalse(_requiere_respuesta_determinista("Muéstrame productos"))
+        self.assertFalse(_requiere_respuesta_determinista("Recomiéndame prendas para una boda"))
+        self.assertTrue(_requiere_respuesta_determinista("¿Cuántas blusas negras hay en stock?"))
+        self.assertTrue(_requiere_respuesta_determinista("Muéstrame mis pedidos"))
+
     def test_prompt_contains_functional_knowledge_and_read_only_db_guards(self) -> None:
         prompt = _prompt_con_contexto("tienda-a", self.context)
         self.assertIn("GUÍA_FUNCIONAL", prompt)
         self.assertIn("No escribas ni ejecutes SQL", prompt)
         self.assertIn("No reveles datos personales", prompt)
         self.assertIn("CONTEXTO_JSON", prompt)
+        self.assertIn("muéstrame productos", prompt)
+        self.assertIn("Compara las opciones y explica por qué encajan", prompt)
 
     def test_exact_data_questions_use_deterministic_reply_but_style_can_use_llm(self) -> None:
         self.assertTrue(_is_exact_data_question("¿Cuántas blusas negras hay en stock?"))

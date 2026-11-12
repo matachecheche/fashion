@@ -80,18 +80,28 @@ class AzureApkPipelineTests(unittest.TestCase):
         self.assertIn("body.estado !== 'ok'", source)
         self.assertLess(source.index("$API_BASE_URL/health"), source.index("npm ci"))
 
+
+    def test_assistant_ui_does_not_label_welcome_as_local_and_shows_fallback_diagnostic(self) -> None:
+        web = (ROOT / "frontend-web/src/components/Asistente.tsx").read_text(encoding="utf-8")
+        mobile = (ROOT / "mobile-app/src/screens/Asistente.tsx").read_text(encoding="utf-8")
+        self.assertNotIn("proveedor: 'local_rules'", web[:web.index('const enviar')])
+        self.assertIn("Diagnóstico técnico:", web)
+        self.assertIn("Diagnóstico:", mobile)
+        self.assertIn("IA generativa no disponible", web)
+        self.assertIn("IA generativa no disponible", mobile)
+
     def test_mobile_app_version_was_incremented_for_ui_fix(self) -> None:
         app = json.loads((ROOT / "mobile-app/app.json").read_text(encoding="utf-8"))["expo"]
-        self.assertEqual(app["version"], "2.2.2")
-        self.assertEqual(app["android"]["versionCode"], 26)
+        self.assertEqual(app["version"], "2.3.0")
+        self.assertEqual(app["android"]["versionCode"], 27)
         config_source = (ROOT / "mobile-app/src/config.ts").read_text(encoding="utf-8")
-        self.assertIn("APP_VERSION = '2.2.2'", config_source)
+        self.assertIn("APP_VERSION = '2.3.0'", config_source)
 
     def test_mobile_version_metadata_stays_aligned(self) -> None:
         package = json.loads((ROOT / "mobile-app/package.json").read_text(encoding="utf-8"))
         lock = json.loads((ROOT / "mobile-app/package-lock.json").read_text(encoding="utf-8"))
         app = json.loads((ROOT / "mobile-app/app.json").read_text(encoding="utf-8"))["expo"]
-        self.assertEqual(package["version"], "2.2.2")
+        self.assertEqual(package["version"], "2.3.0")
         self.assertEqual(lock["version"], package["version"])
         self.assertEqual(lock["packages"][""]["version"], package["version"])
         self.assertEqual(app["version"], package["version"])

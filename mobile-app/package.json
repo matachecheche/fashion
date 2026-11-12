@@ -1,6 +1,6 @@
 {
   "name": "fashionstore-mobile-app",
-  "version": "2.2.2",
+  "version": "2.3.0",
   "main": "index.ts",
   "scripts": {
     "start": "expo start",

@@ -13,8 +13,8 @@ GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 # Se prioriza descubrir los modelos habilitados para la clave. Estos IDs son solo
 # alternativas en caso de que la lista del proveedor no esté disponible.
-GROQ_MODEL_CANDIDATES = ("openai/gpt-oss-20b", "qwen/qwen3.8-27b")
-GEMINI_MODEL_CANDIDATES = ("gemini-3.8-flash", "gemini-3.5-flash-lite")
+GROQ_MODEL_CANDIDATES = ("openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b")
+GEMINI_MODEL_CANDIDATES = ("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite")
 EXCLUDED_MODEL_TERMS = (
     "embed", "whisper", "tts", "speech", "audio", "transcri", "image", "vision-only",
     "moderation", "guard", "rerank", "live",
@@ -208,8 +208,11 @@ class LLMClient:
                             *history,
                             {"role": "user", "content": user_prompt},
                         ],
-                        "temperature": 0.2,
+                        "temperature": 0.35,
                         "max_completion_tokens": max_tokens,
+                        **({"reasoning_effort": "high"} if (
+                            model.startswith("openai/gpt-oss-") or model.startswith("qwen/qwen3")
+                        ) else {}),
                     },
                 )
                 response.raise_for_status()
@@ -251,7 +254,7 @@ class LLMClient:
                     json={
                         "systemInstruction": {"parts": [{"text": system_prompt}]},
                         "contents": contents,
-                        "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens},
+                        "generationConfig": {"temperature": 0.35, "maxOutputTokens": max_tokens},
                     },
                 )
                 response.raise_for_status()
@@ -274,7 +277,7 @@ class LLMClient:
         max_tokens: int,
         history: List[Dict[str, str]],
     ) -> Dict[str, str]:
-        with httpx.Client(timeout=25.0) as client:
+        with httpx.Client(timeout=httpx.Timeout(45.0, connect=12.0)) as client:
             if provider == "groq":
                 return self._generate_groq(client, system_prompt, user_prompt, max_tokens, history)
             if provider == "gemini":
@@ -300,20 +303,31 @@ class LLMClient:
         self,
         system_prompt: str,
         user_prompt: str,
-        max_tokens: int = 450,
+        max_tokens: int = 2048,
         history: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, str]:
         safe_history = self._safe_history(history)
-        for provider, key in (("groq", self.settings.groq_api_key), ("gemini", self.settings.gemini_api_key)):
-            if not key:
-                continue
+        configured = [("groq", self.settings.groq_api_key), ("gemini", self.settings.gemini_api_key)]
+        configured = [(provider, key) for provider, key in configured if key]
+        if not configured:
+            return {
+                "provider": "local_rules", "model": None,
+                "text": self._deterministic_reply(user_prompt),
+                "diagnostico": "LLM_KEYS_NOT_CONFIGURED", "errores": {},
+            }
+        for provider, key in configured:
             try:
                 result = self._generate_provider(provider, system_prompt, user_prompt, max_tokens, safe_history)
                 self.last_errors.pop(provider, None)
-                return result
+                return {**result, "diagnostico": None, "errores": {}}
             except Exception as exc:
                 self.last_errors[provider] = self._safe_error(exc, key)
-        return {"provider": "local_rules", "text": self._deterministic_reply(user_prompt)}
+        safe_errors = {provider: self.last_errors.get(provider, "fallo no especificado") for provider, _ in configured}
+        return {
+            "provider": "local_rules", "model": None,
+            "text": self._deterministic_reply(user_prompt),
+            "diagnostico": "LLM_PROVIDERS_FAILED", "errores": safe_errors,
+        }
 
     def _deterministic_reply(self, user_prompt: str) -> str:
         """Fallback general, sin inventar artículos, precios ni cifras de la tienda."""

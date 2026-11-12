@@ -2,7 +2,7 @@
   "expo": {
     "name": "FashionStore",
     "slug": "fashionstore-mobile-app",
-    "version": "2.2.2",
+    "version": "2.3.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "scheme": "fashionstore",
@@ -19,7 +19,7 @@
     },
     "android": {
       "package": "bo.fashionstore.app",
-      "versionCode": 26,
+      "versionCode": 27,
       "adaptiveIcon": {
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
