@@ -93,7 +93,7 @@ export const AsistenteScreen: React.FC = () => {
         </View>
       </View>
 
-      <FlatList keyboardShouldPersistTaps="handled"
+      <FlatList
         data={mensajes}
         keyExtractor={(m) => m.id}
         keyboardShouldPersistTaps="handled"

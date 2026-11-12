@@ -298,6 +298,9 @@ El chat de la web y el de la app móvil comparten `POST /api/ia/chat` en NestJS.
 Configura `GROQ_API_KEY`, `GEMINI_API_KEY` y la misma `IA_INTERNAL_KEY` en los backends, preferiblemente como secretos de Azure Container Apps. Sin claves de proveedor se mantiene el modo local para respuestas deterministas, pero no se dispone de conversación generativa completa. Consulta [docs/IA-ASISTENTE.md](docs/IA-ASISTENTE.md) para arquitectura, límites, roles y pruebas.
 
 
-## APK Android 2.2.0
+## APK Android 2.2.1
 
 La app Android se compila como APK `release` autónomo (sin Metro) desde GitHub Actions o Azure DevOps. Sigue `docs/APK-AZURE.md` para configurar `EXPO_PUBLIC_API_URL`, validar `/api/health` y conservar la firma Android entre versiones. Si la instancia de Azure usa el proxy Nginx incluido, puedes usar el dominio público de la web terminado en `/api` como base de API móvil.
+
+
+Para diagnosticar el Asistente IA desplegado en Azure, sigue [docs/DIAGNOSTICO-IA-AZURE.md](docs/DIAGNOSTICO-IA-AZURE.md). El endpoint `GET /api/ia/estado?probar=true` valida de forma optativa cada proveedor configurado sin revelar las claves.

@@ -69,16 +69,16 @@ class AzureApkPipelineTests(unittest.TestCase):
 
     def test_mobile_app_version_was_incremented_for_ui_fix(self) -> None:
         app = json.loads((ROOT / "mobile-app/app.json").read_text(encoding="utf-8"))["expo"]
-        self.assertEqual(app["version"], "2.2.0")
-        self.assertEqual(app["android"]["versionCode"], 24)
+        self.assertEqual(app["version"], "2.2.1")
+        self.assertEqual(app["android"]["versionCode"], 25)
         config_source = (ROOT / "mobile-app/src/config.ts").read_text(encoding="utf-8")
-        self.assertIn("APP_VERSION = '2.2.0'", config_source)
+        self.assertIn("APP_VERSION = '2.2.1'", config_source)
 
     def test_mobile_version_metadata_stays_aligned(self) -> None:
         package = json.loads((ROOT / "mobile-app/package.json").read_text(encoding="utf-8"))
         lock = json.loads((ROOT / "mobile-app/package-lock.json").read_text(encoding="utf-8"))
         app = json.loads((ROOT / "mobile-app/app.json").read_text(encoding="utf-8"))["expo"]
-        self.assertEqual(package["version"], "2.2.0")
+        self.assertEqual(package["version"], "2.2.1")
         self.assertEqual(lock["version"], package["version"])
         self.assertEqual(lock["packages"][""]["version"], package["version"])
         self.assertEqual(app["version"], package["version"])
@@ -125,6 +125,21 @@ class AzureApkPipelineTests(unittest.TestCase):
         first_use = function_source.index("specificStatus", declaration + len("const specificStatus ="))
         self.assertLess(declaration, first_use)
         self.assertNotIn("!specificStatus", function_source[:declaration])
+
+    def test_mobile_assistant_flatlist_has_no_duplicate_keyboard_prop(self) -> None:
+        source = (ROOT / "mobile-app/src/screens/Asistente.tsx").read_text(encoding="utf-8")
+        self.assertEqual(source.count('keyboardShouldPersistTaps="handled"'), 1)
+
+    def test_ia_status_can_probe_configured_provider_keys(self) -> None:
+        source = (ROOT / "backend-nest/src/ia/ia.module.ts").read_text(encoding="utf-8")
+        self.assertIn("@Query('probar') probar?: string", source)
+        self.assertIn("query: probar === 'true' ? { probar: 'true' } : undefined", source)
+
+    def test_tenant_resolution_database_errors_are_actionable(self) -> None:
+        source = (ROOT / "backend-nest/src/common/db.ts").read_text(encoding="utf-8")
+        self.assertIn("error: 'TENANT_RESOLUTION_FAILED'", source)
+        self.assertIn("status(503)", source)
+        self.assertIn("DATABASE_URL, TLS, permisos de app_runtime", source)
 
     def test_ghcr_preflights_nest_build_before_publishing_images(self) -> None:
         source = (ROOT / ".github/workflows/publish-ghcr.yml").read_text(encoding="utf-8")

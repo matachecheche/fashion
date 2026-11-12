@@ -305,9 +305,23 @@ export class TenantResolutionMiddleware implements NestMiddleware {
       return;
     }
 
-    const tenant = jwtTenant
-      ? await Db.resolveTenantById(jwtTenant.tenant_id)
-      : await Db.resolveTenantBySlug(effectiveSlug);
+    let tenant: TenantInfo | null;
+    try {
+      tenant = jwtTenant
+        ? await Db.resolveTenantById(jwtTenant.tenant_id)
+        : await Db.resolveTenantBySlug(effectiveSlug);
+    } catch (error: any) {
+      const rawCode = String(error?.code || '');
+      const diagnosticCode = /^[A-Z0-9_]{2,32}$/.test(rawCode) ? rawCode : 'TENANT_DATABASE_ERROR';
+      console.error(`[FashionStore] No se pudo resolver el tenant '${effectiveSlug}' en ${pathOnly}: ${diagnosticCode}`);
+      res.status(503).json({
+        statusCode: 503,
+        error: 'TENANT_RESOLUTION_FAILED',
+        diagnostico: diagnosticCode,
+        message: 'No se pudo consultar la tienda en PostgreSQL. Revisa DATABASE_URL, TLS, permisos de app_runtime y las migraciones del backend NestJS.',
+      });
+      return;
+    }
     if (tenant && jwtTenant && tenant.tenantSlug !== claimSlug) {
       res.status(403).json({ statusCode: 403, error: 'TENANT_CLAIM_MISMATCH', message: 'La tienda del token no coincide con el registro del servidor.' });
       return;

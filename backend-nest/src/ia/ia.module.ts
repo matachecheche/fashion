@@ -55,21 +55,27 @@ export async function invocarFastApi(
 @Controller('ia')
 export class IaController {
   @Get('estado')
-  async estadoIa() {
+  async estadoIa(@Query('probar') probar?: string) {
     const tenant = TenantContext.require();
     try {
-      const data = await invocarFastApi('/asistente/estado');
+      const data = await invocarFastApi('/asistente/estado', {
+        query: probar === 'true' ? { probar: 'true' } : undefined,
+        timeoutMs: probar === 'true' ? 60000 : 9000,
+      });
       return {
         ...data,
         proxy: 'nestjs',
         tenant_slug: tenant.tenantSlug,
       };
-    } catch {
+    } catch (error: any) {
+      const code = typeof error?.cause?.code === 'string' ? error.cause.code : undefined;
+      console.warn('[FashionStore IA] No se pudo consultar el estado de FastAPI:', code || error?.name || 'error');
       return {
         tenant_slug: tenant.tenantSlug,
         modo: 'local',
         proveedor: 'local_rules',
         proxy: 'nestjs-local-fallback',
+        diagnostico: 'FASTAPI_NO_DISPONIBLE',
       };
     }
   }

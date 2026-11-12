@@ -98,3 +98,14 @@
 - La suite Python del repositorio se ejecuta localmente y valida regresiones funcionales, configuración y paquete.
 - La comprobación TSX de sintaxis/imports se realiza sin reemplazar el typecheck estricto con dependencias instaladas.
 - La compilación nativa release, firma estable y prueba en dispositivo deben confirmarse en Azure usando la API y el keystore del propietario.
+
+
+## Versión móvil 2.2.1 — Hotfix de asistente y pipeline
+
+- Se eliminó el atributo JSX duplicado `keyboardShouldPersistTaps` de la lista del asistente Android.
+- Se asegura que `specificStatus` esté declarado antes de usarse en `isAssistantDetailRequest`, evitando TS2448 durante el build NestJS.
+- Se alineó la versión móvil en `2.2.1` y el `versionCode` Android base en `25`.
+- `GET /api/ia/estado?probar=true` puede ejecutar una prueba real de Groq y Gemini desde FastAPI a través de NestJS, con errores saneados y sin exponer claves.
+- Los errores de conexión/resolución del tenant en PostgreSQL se reportan como HTTP 503 `TENANT_RESOLUTION_FAILED`, con un código diagnóstico y sin devolver credenciales.
+- Se añadieron instrucciones de diagnóstico para diferenciar fallo de base de datos, resolución de tenant, proxy NestJS→FastAPI y claves del proveedor.
+- Suite Python del repositorio: 119 pruebas aprobadas. El análisis del compilador no detecta TS17001, TS2448 ni TS2454 en los archivos corregidos. No se declara un `npm run build` integral local: npm ci no terminó de recuperar todas las dependencias en este entorno.
